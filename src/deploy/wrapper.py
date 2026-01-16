@@ -2,30 +2,63 @@ import mlflow
 import pickle
 import pandas as pd
 import numpy as np
+from darts import TimeSeries
+from darts.utils.timeseries_generation import datetime_attribute_timeseries
 
 class UnifiedForecaster(mlflow.pyfunc.PythonModel):
     """
     Wrapper "All-in-One" para deploy.
-    Encapsula o pipeline de transformação (Darts) e o modelo treinado.
-    Realiza o fluxo completo: Raw Data -> Normalize -> Predict -> Inverse Transform
+    Gera automaticamente features de calendário e blinda a ordem das colunas.
     """
     def load_context(self, context):
-        # Carrega o modelo treinado
+        import os
         with open(context.artifacts["darts_model"], "rb") as f:
             self.model = pickle.load(f)
-            
-        # Carrega o pipeline de preprocessamento (Scaler, MissingFiller)
         with open(context.artifacts["pipeline"], "rb") as f:
             self.pipeline = pickle.load(f)
+        
+        if "metadata" in context.artifacts:
+            with open(context.artifacts["metadata"], "rb") as f:
+                self.metadata = pickle.load(f)
+        else:
+            self.metadata = {}
+
+    def _add_calendar_features(self, df):
+        """
+        Recria as features de calendário (Seno/Cosseno/Dummies) usadas no treino.
+        Isso evita que o usuário tenha que calculá-las manualmente.
+        """
+        if 'DATA' not in df.columns:
+            return df
             
-        # Carrega covariáveis futuras (se houver)
-        self.future_covariates = None
-        if "future_covariates" in context.artifacts:
-            try:
-                with open(context.artifacts["future_covariates"], "rb") as f:
-                    self.future_covariates = pickle.load(f)
-            except Exception as e:
-                print(f"⚠️ [UnifiedForecaster] Erro ao carregar covariáveis: {e}")
+        # 1. Cria índice de datas únicas presentes no input
+        dates = pd.to_datetime(df['DATA'].unique())
+        dates = dates.sort_values()
+        
+        # 2. Gera as TimeSeries do Darts (Exatamente como no data.py)
+        ts_idx = pd.DatetimeIndex(dates)
+        
+        # Day of Week (Cyclic) -> dayofweek_sin, dayofweek_cos
+        ts_day = datetime_attribute_timeseries(ts_idx, attribute="dayofweek", cyclic=True)
+        
+        # Quarter (One Hot) -> quarter_0, quarter_1, quarter_2, quarter_3
+        # Nota: OneHot pode gerar menos colunas se o input for curto (ex: só Jan). 
+        # Vamos tratar isso depois preenchendo as faltantes.
+        ts_quarter = datetime_attribute_timeseries(ts_idx, attribute="quarter", one_hot=True)
+        
+        # Week (Cyclic) -> week_sin, week_cos
+        ts_week = datetime_attribute_timeseries(ts_idx, attribute="week", cyclic=True)
+        
+        # 3. Stack e Converte para DataFrame
+        ts_full = ts_day.stack(ts_quarter).stack(ts_week)
+        df_cal = ts_full.pd_dataframe().reset_index().rename(columns={'time': 'DATA'})
+        
+        # Converte DATA para string/object para merge seguro se o input for string
+        df['DATA'] = pd.to_datetime(df['DATA'])
+        
+        # 4. Merge com o DataFrame original
+        df_merged = pd.merge(df, df_cal, on='DATA', how='left')
+        return df_merged
 
     def predict(self, context, model_input):
         from darts import TimeSeries
@@ -45,61 +78,69 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         try:
             if isinstance(model_input, pd.DataFrame) and len(model_input) > 1:
                 
-                # --- DETECÇÃO DE COLUNAS ---
-                required = ['DATA', 'CODIGO_LOJA', 'TARGET_VENDAS']
-                if not all(c in model_input.columns for c in required):
-                    raise ValueError(f"Input deve conter {required}")
+                # --- CORREÇÃO DO ERRO CRÍTICO (DUPLICIDADE DE COLUNAS) ---
+                # Remove colunas duplicadas que podem ter sido geradas em Joins anteriores.
+                # Isso resolve o erro "Grouper for 'CODIGO_LOJA' not 1-dimensional"
+                model_input = model_input.loc[:, ~model_input.columns.duplicated()]
 
-                # Estáticas (Texto -> Encoding depois)
-                possible_static = ["CLUSTER_LOJA", "SIGLA_UF", "TIPO_LOJA", "MODELO_LOJA"]
-                static_cols = [c for c in possible_static if c in model_input.columns]
+                # --- PASSO 0: ENRIQUECIMENTO AUTOMÁTICO (CALENDÁRIO) ---
+                model_input = self._add_calendar_features(model_input)
 
-                # Covariáveis Dinâmicas (Tudo que não é Target, ID, Data, n ou Estática)
-                # Ex: IS_FERIADO, PIB, DOLAR...
-                reserved = set(required + static_cols + ['n'])
-                covariate_cols = [c for c in model_input.columns if c not in reserved]
+                # --- RECUPERAÇÃO DA ORDEM ---
+                if hasattr(self, 'metadata') and self.metadata:
+                    ordered_static = self.metadata.get("static_cols_order", [])
+                    ordered_covariates = self.metadata.get("covariate_cols_order", [])
+                else:
+                    # Fallback arriscado
+                    possible_static = ["CLUSTER_LOJA", "SIGLA_UF", "TIPO_LOJA", "MODELO_LOJA"]
+                    ordered_static = [c for c in possible_static if c in model_input.columns]
+                    reserved = set(['DATA', 'CODIGO_LOJA', 'TARGET_VENDAS', 'n'] + ordered_static)
+                    ordered_covariates = [c for c in model_input.columns if c not in reserved]
 
-                # --- CONSTRUÇÃO DAS SÉRIES (TARGET) ---
-                # Importante: O Target só deve ir até onde temos dados reais. 
-                # Se o input tiver o futuro preenchido com 0/NaN, o modelo vai achar que a venda foi zero.
-                # Vamos filtrar apenas onde o TARGET não é NaN para criar a série de contexto.
+                # --- PREENCHIMENTO DE COLUNAS FALTANTES ---
+                for col in ordered_covariates:
+                    if col not in model_input.columns:
+                        model_input[col] = 0.0
+
+                # Validação Final
+                missing_static = [c for c in ordered_static if c not in model_input.columns]
+                missing_cov = [c for c in ordered_covariates if c not in model_input.columns]
                 
+                if missing_static or missing_cov:
+                     raise ValueError(f"Input incompleto! Faltando: {missing_static + missing_cov}")
+
+                # --- CONSTRUÇÃO DAS SÉRIES ---
                 df_history = model_input.dropna(subset=['TARGET_VENDAS'])
-                # Opcional: Se você usa 0.0 para futuro em vez de NaN, precisaria de uma lógica de corte por data.
-                # Assumindo aqui que você mandará NaN no futuro ou cortará antes no 'df_history'.
                 
                 target_series_list = TimeSeries.from_group_dataframe(
-                    df_history, # Usa apenas histórico válido
+                    df_history,
                     group_cols="CODIGO_LOJA",
                     time_col="DATA",
                     value_cols="TARGET_VENDAS",
-                    static_cols=static_cols,
+                    static_cols=ordered_static,
                     freq='D',
                     fill_missing_dates=True,
                     fillna_value=0.0
                 )
 
-                # --- CONSTRUÇÃO DAS COVARIÁVEIS (FUTURO + PASSADO) ---
-                # As covariáveis devem usar o dataframe COMPLETO (Histórico + n dias futuros)
-                if covariate_cols:
+                if ordered_covariates:
                     covariate_series_list = TimeSeries.from_group_dataframe(
-                        model_input, # Usa dataframe completo
+                        model_input,
                         group_cols="CODIGO_LOJA",
                         time_col="DATA",
-                        value_cols=covariate_cols, # Pega IS_FERIADO, etc.
+                        value_cols=ordered_covariates, 
                         freq='D',
                         fill_missing_dates=True,
                         fillna_value=0.0
                     )
-                    # Cria dicionário para alinhamento rápido
                     cov_dict = {str(ts.static_covariates.index[0]): ts for ts in covariate_series_list}
                 else:
                     cov_dict = {}
 
-                # --- APLICAÇÃO DO PIPELINE ---
+                # --- PIPELINE ---
                 final_series_input = []
                 final_covariates_input = []
-
+                
                 has_target_scaler = hasattr(self.pipeline, 'target_pipeline')
                 has_static_encoder = hasattr(self.pipeline, 'static_pipeline')
                 has_cov_scaler = hasattr(self.pipeline, 'covariate_pipeline')
@@ -107,44 +148,36 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                 for ts_target in target_series_list:
                     store_id = str(ts_target.static_covariates.index[0])
                     
-                    # 1. Transforma Target + Estáticas
+                    # Target
                     ts_proc = ts_target
-                    if has_target_scaler:
-                        ts_proc = self.pipeline.target_pipeline.transform(ts_proc)
-                    if has_static_encoder:
-                        ts_proc = self.pipeline.static_pipeline.transform(ts_proc)
+                    if has_target_scaler: ts_proc = self.pipeline.target_pipeline.transform(ts_proc)
+                    if has_static_encoder: ts_proc = self.pipeline.static_pipeline.transform(ts_proc)
                     final_series_input.append(ts_proc)
 
-                    # 2. Transforma Covariáveis (Se existirem para esta loja)
+                    # Covariates
                     if store_id in cov_dict:
                         ts_cov = cov_dict[store_id]
-                        if has_cov_scaler:
-                            ts_cov = self.pipeline.covariate_pipeline.transform(ts_cov)
+                        if has_cov_scaler: ts_cov = self.pipeline.covariate_pipeline.transform(ts_cov)
                         final_covariates_input.append(ts_cov)
                 
-                # Injeta no predict
                 predict_kwargs['series'] = final_series_input
                 if final_covariates_input:
                     predict_kwargs['future_covariates'] = final_covariates_input
 
-            # 3. Predição
+            # --- PREDIÇÃO ---
             pred_series_list = self.model.predict(**predict_kwargs)
-            if not isinstance(pred_series_list, list):
-                pred_series_list = [pred_series_list]
+            if not isinstance(pred_series_list, list): pred_series_list = [pred_series_list]
             
-            # 4. Inverse Transform (Target)
             final_df_list = []
             for pred_series in pred_series_list:
                 pred_inverse = self.pipeline.inverse_transform(pred_series, partial=True)
                 df = pred_inverse.pd_dataframe()
                 
-                # Resgata ID
                 store_id = "UNKNOWN"
                 if pred_inverse.static_covariates is not None:
                      store_id = str(pred_inverse.static_covariates.index[0])
                 df['CODIGO_LOJA'] = store_id
                 
-                # Renomeia
                 col_val = [c for c in df.columns if c not in ['CODIGO_LOJA', 'DATA']][0]
                 df.rename(columns={col_val: 'PREVISAO_VENDA'}, inplace=True)
                 final_df_list.append(df)
@@ -152,7 +185,6 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
             return pd.concat(final_df_list).reset_index().rename(columns={'DATA': 'DATA_PREVISAO'})
 
         except Exception as e:
-            print(f"⚠️ [UnifiedForecaster] Erro: {str(e)}")
-            # Retorna dummy para não quebrar pipeline em lote
+            print(f"⚠️ [UnifiedForecaster] Erro Crítico: {str(e)}")
             dates = pd.date_range(start="2025-01-01", periods=n, freq="D")
             return pd.DataFrame({'dummy': np.zeros(n)}, index=dates)

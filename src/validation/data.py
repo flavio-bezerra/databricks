@@ -12,13 +12,7 @@ class DataIngestion:
         self.fe = FeatureEngineeringClient()
 
     def create_training_set(self):
-        """
-        Gera o dataset completo via Feature Store e realiza ETL nativo no Spark.
-        Retorna: DataFrame PySpark (Lazy Evaluation)
-        """
         print("🛒 Construindo Training Set via Feature Store (Spark Native)...")
-
-        # 1. Definir a 'Spine' (Target)
         target_table = f"{self.config.CATALOG}.{self.config.SCHEMA}.bip_vhistorico_targuet_loja"
         
         df_spine = (self.spark.table(target_table)
@@ -28,7 +22,6 @@ class DataIngestion:
                     .withColumn("CODIGO_LOJA", F.col("CODIGO_LOJA").cast("string"))
                    )
 
-        # 2. Configurar Lookups
         feature_lookups = [
             FeatureLookup(
                 table_name=f"{self.config.CATALOG}.{self.config.SCHEMA}.cmc_alojas",
@@ -44,7 +37,6 @@ class DataIngestion:
             )
         ]
 
-        # 3. Criar Training Set (Retorna objeto FeatureEngineeringTrainingSet)
         training_set = self.fe.create_training_set(
             df=df_spine,
             feature_lookups=feature_lookups,
@@ -52,14 +44,9 @@ class DataIngestion:
             exclude_columns=[]
         )
 
-        # 4. Carregar como DataFrame Spark (SEM toPandas aqui)
         df_spark = training_set.load_df()
 
-        # --- ETL NATIVO NO SPARK (Distribuído) ---
         print("   ⚡ Executando limpeza e tratamento no Spark Cluster...")
-        
-        # A. Tratamento de Nulos (Left Joins geram nulos)
-        # Sintaxe Spark: fill(valor, subset=[colunas]) ou fill({col: val})
         df_spark = df_spark.na.fill({
             "IS_FERIADO": 0.0, 
             "TARGET_VENDAS": 0.0,
@@ -69,39 +56,25 @@ class DataIngestion:
             "MODELO_LOJA": "DESCONHECIDO"
         })
 
-        # B. Garantia de Tipos (Casting)
         df_spark = df_spark.withColumn("DATA", F.to_timestamp("DATA"))
-        
         return df_spark
 
     def get_global_support(self):
-        """
-        Carrega suporte global mantendo processamento no Spark até o final.
-        """
         table_name = "bip_vhistorico_suporte_canal_loja"
         print(f"🌍 Carregando suporte global (Spark Aggregation)...")
-        
-        # Toda a agregação ocorre no cluster
         df_spark = (self.spark.table(f"{self.config.CATALOG}.{self.config.SCHEMA}.{table_name}")
             .filter(F.col("DATA").between(self.config.DATA_START, self.config.INGESTION_END))
             .groupBy("DATA")
             .pivot("METRICAS")
             .agg(F.sum("VALOR"))
-            .na.fill(0.0) # Preenche nulos do pivot no Spark
+            .na.fill(0.0)
         )
-        
-        # Só converte o resultado final (pequeno) para Pandas
         pdf = df_spark.toPandas()
         pdf['DATA'] = pd.to_datetime(pdf['DATA'])
         return pdf.set_index('DATA').asfreq('D').fillna(0.0)
 
-    def build_darts_objects(self, df_spark_wide, df_global_support):
-        """
-        Versão Otimizada: Minimiza slice_intersect e usa operações vetorizadas onde possível.
-        """
+    def build_darts_objects(self, df_spark_wide, df_global_support, df_market_indicators=None):
         print("⚙️ Materializando dados do Spark para Pandas (Driver)...")
-        
-        # Conversão Spark -> Pandas (Gargalo de I/O)
         df_wide = df_spark_wide.toPandas()
         df_wide['DATA'] = pd.to_datetime(df_wide['DATA'])
         
@@ -116,12 +89,10 @@ class DataIngestion:
             value_cols="TARGET_VENDAS",
             static_cols=static_cols,
             freq='D',
-            fill_missing_dates=True, # Garante continuidade
+            fill_missing_dates=True,
             fillna_value=0.0
         )
         
-        # Indexação rápida por ID da loja
-        # Nota: O ID fica no índice das covariáveis estáticas
         target_dict = {str(ts.static_covariates.index[0]): ts for ts in target_series_list}
         valid_stores = list(target_dict.keys())
 
@@ -137,44 +108,48 @@ class DataIngestion:
         )
         feriado_dict = {str(ts.static_covariates["CODIGO_LOJA"].iloc[0]): ts for ts in feriado_series_list}
 
-        # Globais
+        # --- Stack Global ---
         ts_support = TimeSeries.from_dataframe(df_global_support, fill_missing_dates=True, freq='D', fillna_value=0.0)
+        
+        if df_market_indicators is not None:
+             ts_market = TimeSeries.from_dataframe(df_market_indicators, fill_missing_dates=True, freq='D', fillna_value=0.0)
+             global_covariates = ts_support.stack(ts_market)
+        else:
+             global_covariates = ts_support
+
+        # Features de Calendário (Reproduzindo lógica de Treino)
         ts_time = datetime_attribute_timeseries(df_global_support.index, attribute="dayofweek", cyclic=True)
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="quarter", one_hot=True))
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="week", cyclic=True))
-        global_covariates = ts_support.stack(ts_time)
+        global_covariates = global_covariates.stack(ts_time)
 
         final_target_list = []
         full_covariates_list = []
 
         print("   Build: Stacking Final (Otimizado)...")
-        
-        # OTIMIZAÇÃO: Loop mais leve
         for loja in valid_stores:
             ts_target = target_dict[loja]
             final_target_list.append(ts_target)
             
-            # 1. Feature Local (Feriado)
             ts_local = feriado_dict.get(loja)
             if ts_local is None:
-                # Criação rápida de dummy zerado se não existir feriado para a loja
+                # --- CORREÇÃO AQUI: Nomear explicitamente a coluna ---
                 ts_local = TimeSeries.from_times_and_values(
-                    ts_target.time_index, np.zeros((len(ts_target), 1)), freq='D'
+                    ts_target.time_index, 
+                    np.zeros((len(ts_target), 1)), 
+                    freq='D',
+                    columns=["IS_FERIADO"] # <--- ISSO ELIMINA A COLUNA '0'
                 )
             else:
-                # Só recorta se as datas não baterem exatamente (evita processamento inútil)
                 if ts_local.start_time() != ts_target.start_time() or ts_local.end_time() != ts_target.end_time():
                     ts_local = ts_local.slice_intersect(ts_target)
 
-            # 2. Feature Global
-            # Só recorta se necessário
             if global_covariates.start_time() != ts_target.start_time() or global_covariates.end_time() != ts_target.end_time():
                  ts_global_cut = global_covariates.slice_intersect(ts_target)
             else:
                  ts_global_cut = global_covariates
 
-            # 3. Empilhamento final
             full_covariates_list.append(ts_global_cut.stack(ts_local))
 
-            print(f"✅ Objetos Darts Prontos: {len(final_target_list)} lojas processadas.")
+        print(f"✅ Objetos Darts Prontos: {len(final_target_list)} lojas processadas.")
         return final_target_list, full_covariates_list
