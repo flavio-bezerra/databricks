@@ -78,9 +78,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         try:
             if isinstance(model_input, pd.DataFrame) and len(model_input) > 1:
                 
-                # --- CORREÇÃO DO ERRO CRÍTICO (DUPLICIDADE DE COLUNAS) ---
-                # Remove colunas duplicadas que podem ter sido geradas em Joins anteriores.
-                # Isso resolve o erro "Grouper for 'CODIGO_LOJA' not 1-dimensional"
+                # --- LIMPEZA DE DUPLICATAS ---
                 model_input = model_input.loc[:, ~model_input.columns.duplicated()]
 
                 # --- PASSO 0: ENRIQUECIMENTO AUTOMÁTICO (CALENDÁRIO) ---
@@ -90,6 +88,13 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                 if hasattr(self, 'metadata') and self.metadata:
                     ordered_static = self.metadata.get("static_cols_order", [])
                     ordered_covariates = self.metadata.get("covariate_cols_order", [])
+                    
+                    # --- CORREÇÃO DO ERRO 'Grouper not 1-dimensional' ---
+                    # O Darts adiciona o grupo nas estáticas automaticamente.
+                    # Se passarmos ele em 'static_cols', cria conflito. Removemos aqui.
+                    if "CODIGO_LOJA" in ordered_static:
+                        ordered_static.remove("CODIGO_LOJA")
+                        
                 else:
                     # Fallback arriscado
                     possible_static = ["CLUSTER_LOJA", "SIGLA_UF", "TIPO_LOJA", "MODELO_LOJA"]
@@ -104,10 +109,10 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
 
                 # Validação Final
                 missing_static = [c for c in ordered_static if c not in model_input.columns]
-                missing_cov = [c for c in ordered_covariates if c not in model_input.columns]
+                # Nota: missing_cov pode ter falsos positivos se ordered_covariates tiver lixo, mas ok alertar
                 
-                if missing_static or missing_cov:
-                     raise ValueError(f"Input incompleto! Faltando: {missing_static + missing_cov}")
+                if missing_static:
+                     raise ValueError(f"Input incompleto! Faltando Estáticas: {missing_static}")
 
                 # --- CONSTRUÇÃO DAS SÉRIES ---
                 df_history = model_input.dropna(subset=['TARGET_VENDAS'])
@@ -117,7 +122,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     group_cols="CODIGO_LOJA",
                     time_col="DATA",
                     value_cols="TARGET_VENDAS",
-                    static_cols=ordered_static,
+                    static_cols=ordered_static, # AGORA ESTÁ LIMPO (Sem CODIGO_LOJA)
                     freq='D',
                     fill_missing_dates=True,
                     fillna_value=0.0

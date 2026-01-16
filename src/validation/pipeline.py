@@ -4,6 +4,7 @@ from darts.dataprocessing.transformers import (
     StaticCovariatesTransformer,
     MissingValuesFiller
 )
+from sklearn.preprocessing import OrdinalEncoder
 
 class ProjectPipeline:
     def __init__(self):
@@ -11,9 +12,21 @@ class ProjectPipeline:
             MissingValuesFiller(verbose=False),
             Scaler(name="target_scaler")
         ])
+        
+        # --- ALTERAÇÃO DE SEGURANÇA ---
+        # Usa OrdinalEncoder para lidar com categorias desconhecidas (lojas novas/erros)
+        # unknown_value=-1 garante que o modelo rode mesmo com dados sujos
         self.static_pipeline = Pipeline([
-            StaticCovariatesTransformer(verbose=False)
+            StaticCovariatesTransformer(
+                verbose=False,
+                transformer_cat=OrdinalEncoder(
+                    handle_unknown='use_encoded_value', 
+                    unknown_value=-1
+                )
+            )
         ])
+        # -----------------------------
+
         self.covariate_pipeline = Pipeline([
             MissingValuesFiller(verbose=False),
             Scaler(name="covar_scaler")
