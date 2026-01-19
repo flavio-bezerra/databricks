@@ -7,9 +7,10 @@ from darts.utils.timeseries_generation import datetime_attribute_timeseries
 
 class UnifiedForecaster(mlflow.pyfunc.PythonModel):
     """
-    Wrapper "All-in-One" para deploy.
-    Detecta se o input já possui futuro (covariáveis reais) ou se precisa estender artificialmente.
-    Corrige erro de ordenação de datas e blinda IDs.
+    Wrapper "All-in-One" Robusto.
+    - Processa item a item para garantir compatibilidade com Scalers.
+    - Cria futuro artificial se necessário.
+    - Retorna dummy data com tipagem correta em caso de erro crítico.
     """
     def load_context(self, context):
         with open(context.artifacts["darts_model"], "rb") as f:
@@ -24,45 +25,36 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
             self.metadata = {}
 
     def _ensure_future_horizon(self, df, n):
-        """
-        Verifica se o DataFrame cobre o horizonte futuro necessário.
-        Se cobrir (usuário passou dados reais), mantém.
-        Se não cobrir (usuário passou só histórico), estende com Forward Fill (fallback).
-        """
+        # Tenta pegar buffer do metadata, ou usa 15 (padrão seguro)
+        safety_buffer = self.metadata.get("max_lag", 15) + 2
+        
         if 'DATA' not in df.columns or 'CODIGO_LOJA' not in df.columns:
             return df
         
-        # Garante datetime
         df['DATA'] = pd.to_datetime(df['DATA'])
         
-        # 1. Identifica até onde vai o histórico real de vendas (Target não nulo)
+        # 1. Identifica histórico
         df_history = df.dropna(subset=['TARGET_VENDAS'])
         if df_history.empty:
-            last_history_date = df['DATA'].max() # Fallback
+            last_history_date = df['DATA'].max()
         else:
             last_history_date = df_history['DATA'].max()
             
-        # 2. Identifica até onde vai o input total (pode ter futuro de mercado)
+        # 2. Identifica input total
         last_input_date = df['DATA'].max()
-        
-        # Buffer de segurança para lags
-        safety_buffer = 15
         required_date = last_history_date + pd.Timedelta(days=n + safety_buffer)
         
-        # --- VERIFICAÇÃO INTELIGENTE ---
-        # Se os dados fornecidos já vão longe o suficiente no futuro, NÃO estendemos.
+        # Se já tem futuro suficiente, retorna
         if last_input_date >= required_date:
             return df
             
-        # --- EXTENSÃO ARTIFICIAL (FALLBACK) ---
+        # Extensão Artificial (Fallback)
         future_horizon = (required_date - last_input_date).days + 1
         if future_horizon < 1: future_horizon = 1
         
         future_dates = pd.date_range(start=last_input_date + pd.Timedelta(days=1), periods=future_horizon, freq='D')
         
-        # Identifica a última linha de cada loja para usar como base
         last_rows = df.sort_values('DATA').groupby('CODIGO_LOJA').tail(1)
-        
         future_dfs = []
         for _, row in last_rows.iterrows():
             temp_df = pd.DataFrame({'DATA': future_dates})
@@ -83,7 +75,6 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         if 'DATA' not in df.columns:
             return df
             
-        # CORREÇÃO DO ERRO 'DatetimeArray':
         dates_unique = df['DATA'].unique()
         ts_idx = pd.Index(dates_unique)
         if not isinstance(ts_idx, pd.DatetimeIndex):
@@ -119,13 +110,12 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         try:
             if isinstance(model_input, pd.DataFrame) and len(model_input) > 1:
                 
+                # --- PREPARAÇÃO ---
                 model_input = model_input.loc[:, ~model_input.columns.duplicated()]
-                
-                # CHAMA A NOVA EXTENSÃO INTELIGENTE
                 model_input = self._ensure_future_horizon(model_input, n)
-                
                 model_input = self._add_calendar_features(model_input)
 
+                # --- GESTÃO DE COLUNAS ---
                 if hasattr(self, 'metadata') and self.metadata:
                     ordered_static = self.metadata.get("static_cols_order", [])
                     ordered_covariates = self.metadata.get("covariate_cols_order", [])
@@ -134,8 +124,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                 else:
                     possible_static = ["CLUSTER_LOJA", "SIGLA_UF", "TIPO_LOJA", "MODELO_LOJA"]
                     ordered_static = [c for c in possible_static if c in model_input.columns]
-                    ordered_static = [c for c in ordered_static if c in model_input.columns] # Segurança extra
-                    
+                    ordered_static = [c for c in ordered_static if c in model_input.columns]
                     reserved = set(['DATA', 'CODIGO_LOJA', 'TARGET_VENDAS', 'n'] + ordered_static)
                     ordered_covariates = [c for c in model_input.columns if c not in reserved]
 
@@ -143,6 +132,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     if col not in model_input.columns:
                         model_input[col] = 0.0
 
+                # --- SÉRIES (TARGET) ---
                 df_history = model_input.dropna(subset=['TARGET_VENDAS'])
                 
                 target_series_list = TimeSeries.from_group_dataframe(
@@ -156,6 +146,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     fillna_value=0.0
                 )
 
+                # Mapa seguro de IDs
                 store_ids_map = []
                 for ts in target_series_list:
                     if "CODIGO_LOJA" in ts.static_covariates.columns:
@@ -164,6 +155,8 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                         raw_id = str(ts.static_covariates.index[0])
                     store_ids_map.append(raw_id)
 
+                # --- COVARIÁVEIS ---
+                cov_dict = {}
                 if ordered_covariates:
                     covariate_series_list = TimeSeries.from_group_dataframe(
                         model_input,
@@ -174,17 +167,15 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                         fill_missing_dates=True,
                         fillna_value=0.0
                     )
-                    
-                    cov_dict = {}
                     for ts in covariate_series_list:
                         if "CODIGO_LOJA" in ts.static_covariates.columns:
                             c_id = str(ts.static_covariates["CODIGO_LOJA"].iloc[0])
                         else:
                             c_id = str(ts.static_covariates.index[0])
                         cov_dict[c_id] = ts
-                else:
-                    cov_dict = {}
 
+                # --- PIPELINE TRANSFORM (LOOP SEGURO) ---
+                # Revertido para loop para evitar erro de shape no Scaler
                 final_series_input = []
                 final_covariates_input = []
                 
@@ -210,18 +201,16 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     predict_kwargs['future_covariates'] = final_covariates_input
 
             # --- PREDIÇÃO ---
-            # IMPORTANTE: Esta parte deve estar indentada dentro do TRY
             pred_series_list = self.model.predict(**predict_kwargs)
             if not isinstance(pred_series_list, list): pred_series_list = [pred_series_list]
             
+            # --- PÓS-PROCESSAMENTO ---
             final_df_list = []
             
             for pred_series, original_store_id in zip(pred_series_list, store_ids_map):
                 pred_inverse = self.pipeline.inverse_transform(pred_series, partial=True)
                 df = pred_inverse.pd_dataframe()
                 df['CODIGO_LOJA'] = original_store_id
-                
-                # Renomeia dinamicamente
                 col_val = [c for c in df.columns if c not in ['CODIGO_LOJA', 'DATA']][0]
                 df.rename(columns={col_val: 'PREVISAO_VENDA'}, inplace=True)
                 final_df_list.append(df)
@@ -230,5 +219,13 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
 
         except Exception as e:
             print(f"⚠️ [UnifiedForecaster] Erro Crítico: {str(e)}")
-            dates = pd.date_range(start="2025-01-01", periods=n, freq="D")
-            return pd.DataFrame({'dummy_error': np.zeros(n)}, index=dates)
+            
+            # RETORNO DE SEGURANÇA PARA O SPARK (Dummy com 1 linha e tipos corretos)
+            # Evita o erro 'cannot infer schema from empty dataset'
+            fallback_dates = pd.date_range(start="2025-01-01", periods=n, freq="D")
+            df_error = pd.DataFrame({
+                'DATA_PREVISAO': fallback_dates,
+                'PREVISAO_VENDA': np.zeros(n, dtype=float),
+                'CODIGO_LOJA': ["ERROR_FALLBACK"] * n
+            })
+            return df_error
