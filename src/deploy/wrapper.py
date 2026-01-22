@@ -34,7 +34,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         df['data'] = pd.to_datetime(df['data'])
         
         # 1. Identifica histórico
-        df_history = df.dropna(subset=['targuet_vendas'])
+        df_history = df.dropna(subset=['target_vendas'])
         if df_history.empty:
             last_history_date = df['data'].max()
         else:
@@ -59,9 +59,9 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         for _, row in last_rows.iterrows():
             temp_df = pd.DataFrame({'data': future_dates})
             for col in df.columns:
-                if col not in ['data', 'targuet_vendas']: 
+                if col not in ['data', 'target_vendas']: 
                     temp_df[col] = row[col]
-            temp_df['targuet_vendas'] = np.nan
+            temp_df['target_vendas'] = np.nan
             future_dfs.append(temp_df)
             
         if not future_dfs: return df
@@ -97,7 +97,12 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         return df_merged
 
     def predict(self, context, model_input):
+        import mlflow
+        import pickle
         import pandas as pd
+        import numpy as np
+        from darts import TimeSeries
+        from darts.utils.timeseries_generation import datetime_attribute_timeseries
         # 1. Definição do Horizonte (n)
         n = 1
         if isinstance(model_input, pd.DataFrame) and 'n' in model_input.columns:
@@ -140,7 +145,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     df_history,
                     group_cols="codigo_loja",
                     time_col="data",
-                    value_cols="targuet_vendas",
+                    value_cols="target_vendas",
                     static_cols=ordered_static,
                     freq='D',
                     fill_missing_dates=True,
@@ -216,7 +221,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                 df.rename(columns={col_val: 'previsao_venda'}, inplace=True)
                 final_df_list.append(df)
                 
-            return pd.concat(final_df_list).reset_index().rename(columns={'data': 'previsao_venda'})
+            return pd.concat(final_df_list).reset_index().rename(columns={'data': 'data_previsao'})
 
         except Exception as e:
             print(f"⚠️ [UnifiedForecaster] Erro Crítico: {str(e)}")
