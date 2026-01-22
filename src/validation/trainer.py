@@ -174,10 +174,10 @@ class ModelTrainer:
                     # --- PARTE 4: CONSOLIDAÇÃO ---
                     if all_predictions:
                         final_df = pd.concat(all_predictions)
-                        final_df['VERSAO'] = self.config.VERSION
+                        final_df['versao'] = self.config.VERSION
                         
-                        global_mape = np.mean(np.abs((final_df['REAL'] - final_df['PREVISAO']) / final_df['REAL'])) * 100
-                        global_rmse = np.sqrt(np.mean((final_df['REAL'] - final_df['PREVISAO'])**2))
+                        global_mape = np.mean(np.abs((final_df['real'] - final_df['previsao']) / final_df['real'])) * 100
+                        global_rmse = np.sqrt(np.mean((final_df['real'] - final_df['previsao'])**2))
                         
                         mlflow.log_metric("Global_MAPE", global_mape)
                         mlflow.log_metric("Global_RMSE", global_rmse)
@@ -205,25 +205,25 @@ class ModelTrainer:
                 valid_reals.append(ts_real_sliced)
                 
                 res_dfs.append(pd.DataFrame({
-                    'DATA': ts_pred.time_index,
-                    'PREVISAO': ts_pred.values().flatten(),
-                    'REAL': ts_real_sliced.values().flatten(),
-                    'CODIGO_LOJA': str(ts_pred.static_covariates.index[0]) if ts_pred.static_covariates is not None else "UNKNOWN",
-                    'MODELO': model_name,
-                    'METRICA_MES': metrica_mes
+                    'data': ts_pred.time_index,
+                    'previsao': ts_pred.values().flatten(),
+                    'real': ts_real_sliced.values().flatten(),
+                    'codigo_loja': str(ts_pred.static_covariates.index[0]) if ts_pred.static_covariates is not None else "UNKNOWN",
+                    'modelo': model_name,
+                    'metrica_mes': metrica_mes
                 }))
             except:
                 continue 
         
         metrics = {"SMAPE": 0.0, "RMSE": 0.0}
         if valid_preds:
-            metrics["SMAPE"] = float(np.mean(smape(valid_reals, valid_preds)))
-            metrics["RMSE"] = float(np.mean(rmse(valid_reals, valid_preds)))
+            metrics["smape"] = float(np.mean(smape(valid_reals, valid_preds)))
+            metrics["rmse"] = float(np.mean(rmse(valid_reals, valid_preds)))
             
         return {"metrics": metrics, "dfs": res_dfs}
 
     def _save_to_delta(self, pdf):
-        table_name = f"{self.config.CATALOG}.{self.config.SCHEMA}.bip_vresultado_metricas_treinamento_lojas"
+        table_name = f"{self.config.CATALOG}.{self.config.SCHEMA}.resultado_metricas_treinamento_lojas"
         
         try:
             self.spark_session.createDataFrame(pdf).write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(table_name)
