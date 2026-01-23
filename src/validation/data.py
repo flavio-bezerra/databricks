@@ -44,7 +44,7 @@ class DataIngestion:
                 lookup_key=["codigo_loja"],
                 timestamp_lookup_key="data",
                 feature_names=["valor"], 
-                output_name="is_feriado"
+                rename_outputs={"valor": "is_feriado"}
             )
         ]
 

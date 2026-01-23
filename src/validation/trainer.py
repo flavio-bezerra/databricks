@@ -78,7 +78,7 @@ class ModelTrainer:
             all_predictions = []
             
             try:
-                with mlflow.start_run(run_name=f"{model_name}_v{self.config.VERSION}") as run:
+                with mlflow.start_run(run_name=f"{model_name}_v{self.config.VERSION}", nested=True) as run:
                     # --- PARTE 1: LOGGING DE METADADOS RICOS ---
                     print(f"   📝 Registrando metadados do experimento...")
                     
