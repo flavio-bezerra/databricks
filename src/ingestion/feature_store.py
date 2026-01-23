@@ -1,9 +1,26 @@
+from typing import List, Union, Optional
 from databricks.feature_engineering import FeatureEngineeringClient
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, DataFrame
 
-def salvar_feature_table(df, table_name_full, pk_columns, timestamp_col=None, spark=None):
+def salvar_feature_table(
+    df: DataFrame, 
+    table_name_full: str, 
+    pk_columns: Union[str, List[str]], 
+    timestamp_col: Optional[str] = None, 
+    spark: Optional[SparkSession] = None
+) -> None:
     """
     Salva ou atualiza uma tabela no Feature Store com melhores práticas (Liquid Clustering/Optimize).
+
+    Args:
+        df (DataFrame): O DataFrame PySpark contendo os features.
+        table_name_full (str): Nome completo da tabela (catalog.schema.table).
+        pk_columns (Union[str, List[str]]): Coluna(s) chave primária.
+        timestamp_col (Optional[str]): Coluna de timestamp para Point-in-time lookup.
+        spark (Optional[SparkSession]): Sessão Spark ativa.
+
+    Returns:
+        None
     """
     if spark is None:
         spark = SparkSession.builder.getOrCreate()

@@ -4,23 +4,28 @@ import pandas as pd
 import numpy as np
 import hashlib
 import traceback
+from typing import Dict, List, Any, Optional
+from darts import TimeSeries
 from darts.metrics import mape, rmse, smape
 from mlflow.models import ModelSignature
 from mlflow.types.schema import Schema, ColSpec
+from pyspark.sql import SparkSession
 from .models import DartsWrapper
 
 class ModelTrainer:
-    def __init__(self, config, models_dict):
+    """
+    Classe responsável pelo treinamento e validação walk-forward dos modelos.
+    """
+    def __init__(self, config: Any, models_dict: Dict[str, Any]):
         self.config = config
         self.models = models_dict
-        self.success_models = []
-        self.failed_models = []
-        self.spark_session = getattr(config, 'spark_session', None)
+        self.success_models: List[str] = []
+        self.failed_models: List[str] = []
+        self.spark_session: Optional[SparkSession] = getattr(config, 'spark_session', None)
         if not self.spark_session:
-             from pyspark.sql import SparkSession
              self.spark_session = SparkSession.builder.getOrCreate()
 
-    def _get_store_ids(self, series_list):
+    def _get_store_ids(self, series_list: List[TimeSeries]) -> List[str]:
         """Extrai IDs das lojas das TimeSeries de forma segura"""
         ids = []
         for ts in series_list:
@@ -30,11 +35,19 @@ class ModelTrainer:
                     ids.append(str(ts.static_covariates.index[0]))
                 else:
                     ids.append("UNKNOWN")
-            except:
+            except Exception:
                 ids.append("ERROR")
         return ids
 
-    def train_evaluate_walkforward(self, train_series_static, train_covs_static, full_series_scaled, full_covariates_scaled, val_series_original, target_pipeline):
+    def train_evaluate_walkforward(
+        self, 
+        train_series_static: List[TimeSeries], 
+        train_covs_static: List[TimeSeries], 
+        full_series_scaled: List[TimeSeries], 
+        full_covariates_scaled: List[TimeSeries], 
+        val_series_original: List[TimeSeries], 
+        target_pipeline: Any
+    ) -> None:
         """
         Executa treinamento estático (2024) e validação mensal progressiva (2025).
         """
@@ -192,7 +205,7 @@ class ModelTrainer:
                 traceback.print_exc()
                 self.failed_models.append(model_name)
 
-    def _calc_metrics_and_format(self, preds, reals_full, metrica_mes, model_name):
+    def _calc_metrics_and_format(self, preds: Any, reals_full: Any, metrica_mes: str, model_name: str) -> Dict[str, Any]:
         if not isinstance(preds, list): preds = [preds]
         if not isinstance(reals_full, list): reals_full = [reals_full]
 
@@ -212,7 +225,7 @@ class ModelTrainer:
                     'modelo': model_name,
                     'metrica_mes': metrica_mes
                 }))
-            except:
+            except Exception:
                 continue 
         
         metrics = {"SMAPE": 0.0, "RMSE": 0.0}
@@ -222,7 +235,7 @@ class ModelTrainer:
             
         return {"metrics": metrics, "dfs": res_dfs}
 
-    def _save_to_delta(self, pdf):
+    def _save_to_delta(self, pdf: pd.DataFrame) -> None:
         table_name = f"{self.config.CATALOG}.{self.config.SCHEMA}.resultado_metricas_treinamento_lojas"
         
         try:

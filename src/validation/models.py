@@ -2,16 +2,17 @@ import mlflow
 import pickle
 import pandas as pd
 import numpy as np
+from typing import Any, Optional
 
 class DartsWrapper(mlflow.pyfunc.PythonModel):
     """
     Wrapper melhorado para suportar inferencia com covariaveis globais.
     """
-    def load_context(self, context):
+    def load_context(self, context: Any) -> None:
         with open(context.artifacts["darts_model"], "rb") as f:
             self.model = pickle.load(f)
         
-        self.future_covariates = None
+        self.future_covariates: Optional[Any] = None
         if "future_covariates" in context.artifacts:
             try:
                 with open(context.artifacts["future_covariates"], "rb") as f:
@@ -19,13 +20,13 @@ class DartsWrapper(mlflow.pyfunc.PythonModel):
             except Exception as e:
                 print(f"⚠️ [Wrapper] Erro ao carregar covariáveis: {e}")
 
-    def predict(self, context, model_input):
+    def predict(self, context: Any, model_input: pd.DataFrame) -> pd.DataFrame:
         n = 1
         if isinstance(model_input, pd.DataFrame):
             if 'n' in model_input.columns:
                 try:
                     n = int(model_input.iloc[0]['n'])
-                except:
+                except Exception:
                     pass
         
         predict_kwargs = {"n": n}

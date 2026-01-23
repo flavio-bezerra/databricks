@@ -1,3 +1,5 @@
+from typing import Tuple
+from darts import TimeSeries
 from darts.dataprocessing.pipeline import Pipeline
 from darts.dataprocessing.transformers import (
     Scaler,
@@ -7,6 +9,9 @@ from darts.dataprocessing.transformers import (
 from sklearn.preprocessing import OrdinalEncoder
 
 class ProjectPipeline:
+    """
+    Pipeline unificado de pré-processamento para Targets e Covariáveis do Darts.
+    """
     def __init__(self):
         self.target_pipeline = Pipeline([
             MissingValuesFiller(verbose=False),
@@ -32,17 +37,47 @@ class ProjectPipeline:
             Scaler(name="covar_scaler")
         ])
 
-    def fit(self, target_series, covariates):
+    def fit(self, target_series: TimeSeries, covariates: TimeSeries) -> "ProjectPipeline":
+        """
+        Ajusta os escaladores nos dados de treino.
+
+        Args:
+            target_series: Série temporal alvo.
+            covariates: Covariáveis.
+
+        Returns:
+            self
+        """
         self.target_pipeline.fit(target_series)
         self.static_pipeline.fit(target_series) 
         self.covariate_pipeline.fit(covariates)
         return self
 
-    def transform(self, target_series, covariates):
+    def transform(self, target_series: TimeSeries, covariates: TimeSeries) -> Tuple[TimeSeries, TimeSeries]:
+        """
+        Aplica as transformações.
+
+        Args:
+            target_series: Série temporal alvo.
+            covariates: Covariáveis.
+
+        Returns:
+            Tuple[TimeSeries, TimeSeries]: Séries transformadas.
+        """
         ts_scaled = self.target_pipeline.transform(target_series)
         ts_scaled = self.static_pipeline.transform(ts_scaled)
         cov_scaled = self.covariate_pipeline.transform(covariates)
         return ts_scaled, cov_scaled
 
-    def inverse_transform(self, target_series, partial=False):
+    def inverse_transform(self, target_series: TimeSeries, partial: bool = False) -> TimeSeries:
+        """
+        Reverte a transformação do target (útil para predições).
+
+        Args:
+            target_series: Série temporal escalada.
+            partial (bool): Se True, inverte parcialmente.
+
+        Returns:
+            TimeSeries: Série temporal na escala original.
+        """
         return self.target_pipeline.inverse_transform(target_series, partial=partial)

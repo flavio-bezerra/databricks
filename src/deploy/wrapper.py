@@ -2,6 +2,7 @@ import mlflow
 import pickle
 import pandas as pd
 import numpy as np
+from typing import Any, List, Optional, Dict
 from darts import TimeSeries
 from darts.utils.timeseries_generation import datetime_attribute_timeseries
 
@@ -12,7 +13,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
     - Cria futuro artificial se necessário.
     - Retorna dummy data com tipagem correta em caso de erro crítico.
     """
-    def load_context(self, context):
+    def load_context(self, context: Any) -> None:
         with open(context.artifacts["darts_model"], "rb") as f:
             self.model = pickle.load(f)
         with open(context.artifacts["pipeline"], "rb") as f:
@@ -24,7 +25,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         else:
             self.metadata = {}
 
-    def _ensure_future_horizon(self, df, n):
+    def _ensure_future_horizon(self, df: pd.DataFrame, n: int) -> pd.DataFrame:
         # Tenta pegar buffer do metadata, ou usa 15 (padrão seguro)
         safety_buffer = self.metadata.get("max_lag", 15) + 2
         
@@ -71,7 +72,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         
         return df_extended
 
-    def _add_calendar_features(self, df):
+    def _add_calendar_features(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'data' not in df.columns:
             return df
             
@@ -96,7 +97,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         df_merged = pd.merge(df, df_cal, on='data', how='left')
         return df_merged
 
-    def predict(self, context, model_input):
+    def predict(self, context: Any, model_input: pd.DataFrame) -> pd.DataFrame:
         import mlflow
         import pickle
         import pandas as pd
@@ -108,7 +109,7 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         if isinstance(model_input, pd.DataFrame) and 'n' in model_input.columns:
             try:
                 n = int(model_input.iloc[0]['n'])
-            except:
+            except Exception:
                 pass
         
         predict_kwargs = {"n": n}
