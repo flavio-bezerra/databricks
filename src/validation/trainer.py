@@ -46,11 +46,14 @@ class ModelTrainer:
         full_series_scaled: List[TimeSeries], 
         full_covariates_scaled: List[TimeSeries], 
         val_series_original: List[TimeSeries], 
-        target_pipeline: Any
+        target_pipeline: Any,
+        allow_new_run: bool = True
     ) -> None:
         """
         Executa treinamento estático (2024) e validação mensal progressiva (2025).
         """
+        from contextlib import nullcontext
+
         mlflow.set_experiment(self.config.EXPERIMENT_NAME)
         
         # Prepara metadados das lojas
@@ -77,8 +80,11 @@ class ModelTrainer:
             model_metrics_global = {}
             all_predictions = []
             
+            # Decide se cria run nova ou usa a ativa
+            run_context = mlflow.start_run(run_name=f"{model_name}_v{self.config.VERSION}", nested=True) if allow_new_run else nullcontext()
+
             try:
-                with mlflow.start_run(run_name=f"{model_name}_v{self.config.VERSION}", nested=True) as run:
+                with run_context:
                     # --- PARTE 1: LOGGING DE METADADOS RICOS ---
                     print(f"   📝 Registrando metadados do experimento...")
                     
@@ -141,7 +147,7 @@ class ModelTrainer:
 
                     print(f"   💾 Registrando modelo como: {full_model_name}")
                     mlflow.pyfunc.log_model(
-                        artifact_path="model",
+                        artifact_path=f"model_{model_name.lower()}", # Caminho único para evitar colisão
                         python_model=DartsWrapper(),
                         artifacts=artifacts,
                         pip_requirements=["darts", "pandas", "numpy", "torch", "pytorch_lightning"],
