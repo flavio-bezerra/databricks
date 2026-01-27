@@ -142,11 +142,16 @@ class DataIngestion:
 
         # Mapa otimizado (Dictionary Comprehension)
         # O Darts coloca a chave do grupo ('codigo_loja') no índice das covariáveis estáticas
-        target_dict = {
-            str(ts.static_covariates.index[0]).replace(".0", ""): ts 
-            for ts in target_series_list 
-            if ts.static_covariates is not None and not ts.static_covariates.empty
-        }
+        # Vamos garantir que este índice tenha o nome correto
+        target_dict = {}
+        for ts in target_series_list:
+            if ts.static_covariates is not None and not ts.static_covariates.empty:
+                # Renomeia o index para garantir que sabemos que é o codigo_loja
+                if ts.static_covariates.index.name == "target_vendas":
+                     ts.with_static_covariates(ts.static_covariates.rename_axis("codigo_loja"))
+                
+                key_val = str(ts.static_covariates.index[0]).replace(".0", "")
+                target_dict[key_val] = ts
         
         valid_stores = list(target_dict.keys())
         print(f"   ℹ️ Lojas identificadas: {len(valid_stores)}")
