@@ -98,50 +98,89 @@ class DataIngestion:
     ) -> Tuple[List[TimeSeries], List[TimeSeries]]:
         """
         Converte DataFrames para objetos TimeSeries do Darts.
-
-        Args:
-            df_spark_wide (DataFrame): DataFrame Spark com dados das lojas.
-            df_global_support (pd.DataFrame): DataFrame Pandas de suporte global.
-            df_market_indicators (Optional[pd.DataFrame]): Indicadores de mercado opcionais.
-
-        Returns:
-            Tuple[List[TimeSeries], List[TimeSeries]]: Listas de Target Series e Covariates.
         """
         print("⚙️ Materializando dados do Spark para Pandas (Driver)...")
         df_wide = df_spark_wide.toPandas()
+        
+        if df_wide.empty:
+            print("⚠️ AVISO: DataFrame df_wide está vazio! Verifique os filtros de data e dados.")
+            return [], []
+
         df_wide['data'] = pd.to_datetime(df_wide['data'])
         
         possible_static = ["codigo_loja", "cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
         static_cols = [c for c in possible_static if c in df_wide.columns]
 
         print("   Build: Criando Target Series (Vetorizado)...")
-        target_series_list = TimeSeries.from_group_dataframe(
-            df_wide,
-            group_cols="codigo_loja",
-            time_col="data",
-            value_cols="target_vendas",
-            static_cols=static_cols,
-            freq='D',
-            fill_missing_dates=True,
-            fillna_value=0.0
-        )
+        try:
+            target_series_list = TimeSeries.from_group_dataframe(
+                df_wide,
+                group_cols="codigo_loja",
+                time_col="data",
+                value_cols="target_vendas",
+                static_cols=static_cols,
+                freq='D',
+                fill_missing_dates=True,
+                fillna_value=0.0
+            )
+        except Exception as e:
+            print(f"❌ Erro crítico no from_group_dataframe (Target): {e}")
+            raise e
+
+        # Mapa seguro ID -> TS
+        target_dict = {}
+        for i, ts in enumerate(target_series_list):
+            try:
+                val = "UNKNOWN"
+                if ts.static_covariates is not None and not ts.static_covariates.empty:
+                    if "codigo_loja" in ts.static_covariates.columns:
+                        val = str(ts.static_covariates["codigo_loja"].iloc[0])
+                    else:
+                        val = str(ts.static_covariates.index[0])
+                
+                if val != "UNKNOWN":
+                     if val.endswith(".0"): val = val[:-2]
+                     target_dict[val] = ts
+            except Exception as e:
+                print(f"⚠️ Erro ao indexar target {i}: {e}")
         
-        target_dict = {str(ts.static_covariates["codigo_loja"].iloc[0]): ts for ts in target_series_list}
         valid_stores = list(target_dict.keys())
+        print(f"   ℹ️ Lojas identificadas: {len(valid_stores)}")
 
         print("   Build: Criando Covariáveis Locais...")
-        feriado_series_list = TimeSeries.from_group_dataframe(
-            df_wide,
-            group_cols="codigo_loja",
-            time_col="data",
-            value_cols="is_feriado",
-            freq='D',
-            fill_missing_dates=True,
-            fillna_value=0.0
-        )
-        feriado_dict = {str(ts.static_covariates["codigo_loja"].iloc[0]): ts for ts in feriado_series_list}
+        try:
+            feriado_series_list = TimeSeries.from_group_dataframe(
+                df_wide,
+                group_cols="codigo_loja",
+                time_col="data",
+                value_cols="is_feriado",
+                static_cols=static_cols,
+                freq='D',
+                fill_missing_dates=True,
+                fillna_value=0.0
+            )
+        except Exception as e:
+            print(f"❌ Erro crítico no from_group_dataframe (Feriado): {e}")
+            raise e
+
+        feriado_dict = {}
+        for i, ts in enumerate(feriado_series_list):
+            try:
+                val = "UNKNOWN"
+                if ts.static_covariates is not None and not ts.static_covariates.empty:
+                    if "codigo_loja" in ts.static_covariates.columns:
+                        val = str(ts.static_covariates["codigo_loja"].iloc[0])
+                    else:
+                         val = str(ts.static_covariates.index[0])
+                
+                if val != "UNKNOWN":
+                     if val.endswith(".0"): val = val[:-2]
+                     feriado_dict[val] = ts
+            except Exception as e:
+                 print(f"⚠️ Erro ao indexar feriado {i}: {e}")
 
         # --- Stack Global ---
+        print("   Build: Preparando Covariáveis Globais...")
         ts_support = TimeSeries.from_dataframe(df_global_support, fill_missing_dates=True, freq='D', fillna_value=0.0)
         
         if df_market_indicators is not None:
@@ -150,7 +189,7 @@ class DataIngestion:
         else:
              global_covariates = ts_support
 
-        # Features de Calendário (Reproduzindo lógica de Treino)
+        # Features de Calendário
         ts_time = datetime_attribute_timeseries(df_global_support.index, attribute="dayofweek", cyclic=True)
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="quarter", one_hot=True))
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="week", cyclic=True))
@@ -164,6 +203,8 @@ class DataIngestion:
             ts_target = target_dict[loja]
             final_target_list.append(ts_target)
             ts_local = feriado_dict.get(loja)
+            
+            # Se não existir feriado específico, cria zerado
             if ts_local is None:
                 ts_local = TimeSeries.from_times_and_values(
                     ts_target.time_index, 
@@ -172,9 +213,11 @@ class DataIngestion:
                     columns=["is_feriado"]
                 )
             else:
+                # Sincronia temporal
                 if ts_local.start_time() != ts_target.start_time() or ts_local.end_time() != ts_target.end_time():
                     ts_local = ts_local.slice_intersect(ts_target)
 
+            # Sincronia global
             if global_covariates.start_time() != ts_target.start_time() or global_covariates.end_time() != ts_target.end_time():
                  ts_global_cut = global_covariates.slice_intersect(ts_target)
             else:

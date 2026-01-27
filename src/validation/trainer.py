@@ -33,14 +33,16 @@ class ModelTrainer:
             if ts.static_covariates is not None:
                 # Prioridade: Coluna explicita
                 if "codigo_loja" in ts.static_covariates.columns:
-                    val = str(ts.static_covariates["codigo_loja"].iloc[0])
-                    if val.endswith(".0"): val = val[:-2]
-                    return val
+                    if not ts.static_covariates.empty:
+                        val = str(ts.static_covariates["codigo_loja"].iloc[0])
+                        if val.endswith(".0"): val = val[:-2]
+                        return val
                 
                 # Fallback: Índice (lógica antiga, mantida por segurança)
-                val = str(ts.static_covariates.index[0])
-                if val.endswith(".0"): val = val[:-2]
-                return val
+                if not ts.static_covariates.empty:
+                    val = str(ts.static_covariates.index[0])
+                    if val.endswith(".0"): val = val[:-2]
+                    return val
         except:
             pass
         return "UNKNOWN"
