@@ -120,7 +120,8 @@ class DataIngestion:
 
         df_wide['data'] = pd.to_datetime(df_wide['data'])
         
-        possible_static = ["codigo_loja", "cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
+        # Remove 'codigo_loja' from static_cols candidates since it is already the group_cols
+        possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
         static_cols = [c for c in possible_static if c in df_wide.columns]
 
         print("   Build: Criando Target Series (Vetorizado)...")
@@ -140,11 +141,11 @@ class DataIngestion:
             raise e
 
         # Mapa otimizado (Dictionary Comprehension)
-        # Como garantimos static_cols=["codigo_loja", ...], podemos acessar diretamente via coluna
+        # O Darts coloca a chave do grupo ('codigo_loja') no índice das covariáveis estáticas
         target_dict = {
-            str(ts.static_covariates["codigo_loja"].iloc[0]).replace(".0", ""): ts 
+            str(ts.static_covariates.index[0]).replace(".0", ""): ts 
             for ts in target_series_list 
-            if ts.static_covariates is not None and "codigo_loja" in ts.static_covariates.columns
+            if ts.static_covariates is not None and not ts.static_covariates.empty
         }
         
         valid_stores = list(target_dict.keys())
@@ -168,9 +169,9 @@ class DataIngestion:
 
         # Mapa otimizado (Dictionary Comprehension)
         feriado_dict = {
-            str(ts.static_covariates["codigo_loja"].iloc[0]).replace(".0", ""): ts 
+            str(ts.static_covariates.index[0]).replace(".0", ""): ts 
             for ts in feriado_series_list
-            if ts.static_covariates is not None and "codigo_loja" in ts.static_covariates.columns
+            if ts.static_covariates is not None and not ts.static_covariates.empty
         }
 
         # --- Stack Global ---
