@@ -180,12 +180,12 @@ class ModelTrainer:
                         
                         metrics_month = self._calc_metrics_and_format(preds_inverse, val_series_original, metrica_mes, model_name)
                         
-                        smape_m = metrics_month['metrics']['SMAPE']
-                        rmse_m = metrics_month['metrics']['RMSE']
+                        smape_m = metrics_month['metrics']['smape']
+                        rmse_m = metrics_month['metrics']['rmse']
                         
                         # Log métricas mensais
-                        mlflow.log_metric(f"SMAPE_{metrica_mes}", smape_m)
-                        
+                        mlflow.log_metric(f"smape_{metrica_mes}", smape_m)
+                        mlflow.log_metric(f"rmse_{metrica_mes}", rmse_m)
                         print(f"     📅 {metrica_mes}: SMAPE={smape_m:.2f}%, RMSE={rmse_m:.2f}")
                         
                         all_predictions.extend(metrics_month['dfs'])
