@@ -111,7 +111,7 @@ class DataIngestion:
         df_wide = df_spark_wide.toPandas()
         df_wide['data'] = pd.to_datetime(df_wide['data'])
         
-        possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
+        possible_static = ["codigo_loja", "cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
         static_cols = [c for c in possible_static if c in df_wide.columns]
 
         print("   Build: Criando Target Series (Vetorizado)...")
@@ -126,7 +126,7 @@ class DataIngestion:
             fillna_value=0.0
         )
         
-        target_dict = {str(ts.static_covariates.index[0]): ts for ts in target_series_list}
+        target_dict = {str(ts.static_covariates["codigo_loja"].iloc[0]): ts for ts in target_series_list}
         valid_stores = list(target_dict.keys())
 
         print("   Build: Criando Covariáveis Locais...")
