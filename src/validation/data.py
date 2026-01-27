@@ -102,6 +102,9 @@ class DataIngestion:
         print("⚙️ Materializando dados do Spark para Pandas (Driver)...")
         df_wide = df_spark_wide.toPandas()
         
+        # Dedup columns to prevent "Grouper not 1-dimensional" error
+        df_wide = df_wide.loc[:, ~df_wide.columns.duplicated()]
+        
         if df_wide.empty:
             print("⚠️ AVISO: DataFrame df_wide está vazio! Verifique os filtros de data e dados.")
             return [], []
