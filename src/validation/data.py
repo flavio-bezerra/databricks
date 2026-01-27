@@ -127,22 +127,13 @@ class DataIngestion:
             print(f"❌ Erro crítico no from_group_dataframe (Target): {e}")
             raise e
 
-        # Mapa seguro ID -> TS
-        target_dict = {}
-        for i, ts in enumerate(target_series_list):
-            try:
-                val = "UNKNOWN"
-                if ts.static_covariates is not None and not ts.static_covariates.empty:
-                    if "codigo_loja" in ts.static_covariates.columns:
-                        val = str(ts.static_covariates["codigo_loja"].iloc[0])
-                    else:
-                        val = str(ts.static_covariates.index[0])
-                
-                if val != "UNKNOWN":
-                     if val.endswith(".0"): val = val[:-2]
-                     target_dict[val] = ts
-            except Exception as e:
-                print(f"⚠️ Erro ao indexar target {i}: {e}")
+        # Mapa otimizado (Dictionary Comprehension)
+        # Como garantimos static_cols=["codigo_loja", ...], podemos acessar diretamente via coluna
+        target_dict = {
+            str(ts.static_covariates["codigo_loja"].iloc[0]).replace(".0", ""): ts 
+            for ts in target_series_list 
+            if ts.static_covariates is not None and "codigo_loja" in ts.static_covariates.columns
+        }
         
         valid_stores = list(target_dict.keys())
         print(f"   ℹ️ Lojas identificadas: {len(valid_stores)}")
@@ -163,21 +154,12 @@ class DataIngestion:
             print(f"❌ Erro crítico no from_group_dataframe (Feriado): {e}")
             raise e
 
-        feriado_dict = {}
-        for i, ts in enumerate(feriado_series_list):
-            try:
-                val = "UNKNOWN"
-                if ts.static_covariates is not None and not ts.static_covariates.empty:
-                    if "codigo_loja" in ts.static_covariates.columns:
-                        val = str(ts.static_covariates["codigo_loja"].iloc[0])
-                    else:
-                         val = str(ts.static_covariates.index[0])
-                
-                if val != "UNKNOWN":
-                     if val.endswith(".0"): val = val[:-2]
-                     feriado_dict[val] = ts
-            except Exception as e:
-                 print(f"⚠️ Erro ao indexar feriado {i}: {e}")
+        # Mapa otimizado (Dictionary Comprehension)
+        feriado_dict = {
+            str(ts.static_covariates["codigo_loja"].iloc[0]).replace(".0", ""): ts 
+            for ts in feriado_series_list
+            if ts.static_covariates is not None and "codigo_loja" in ts.static_covariates.columns
+        }
 
         # --- Stack Global ---
         print("   Build: Preparando Covariáveis Globais...")
