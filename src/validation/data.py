@@ -72,13 +72,12 @@ class DataIngestion:
 
     def get_global_support(self) -> pd.DataFrame:
         """
-        Calcula e retorna dados de suporte global agregados.
-        
-        Returns:
-            pd.DataFrame: DataFrame Pandas indexado por data.
+        Calcula e retorna dados de suporte global agregados com extensão futura.
         """
         table_name = "historico_suporte_loja"
         print(f"🌍 Carregando suporte global (Spark Aggregation)...")
+
+        # Atribuição correta à variável df_spark
         df_spark = (self.spark.table(f"{self.config.CATALOG}.{self.config.SCHEMA}.{table_name}")
             .filter(F.col("DATA").between(self.config.DATA_START, self.config.INGESTION_END))
             .groupBy("data")
@@ -86,9 +85,20 @@ class DataIngestion:
             .agg(F.sum("valor"))
             .na.fill(0.0)
         )
-        pdf = df_spark.toPandas()
+
+        # Conversão para Pandas usando a variável definida acima
+        pdf = df_spark.toPandas() 
         pdf['data'] = pd.to_datetime(pdf['data'])
-        return pdf.set_index('data').asfreq('D').fillna(0.0)
+        pdf = pdf.set_index('data').asfreq('D').fillna(0.0)
+
+        # --- Lógica de Extensão para o Horizonte de Predição ---
+        # Garante que as covariáveis cubram o treino + horizonte de predição (n)
+        full_range = pd.date_range(
+            start=pdf.index.min(), 
+            periods=len(pdf) + self.config.FORECAST_HORIZON, 
+            freq='D'
+        )
+        return pdf.reindex(full_range).ffill().fillna(0.0)
 
     def build_darts_objects(
         self, 
@@ -97,90 +107,82 @@ class DataIngestion:
         df_market_indicators: Optional[pd.DataFrame] = None
     ) -> Tuple[List[TimeSeries], List[TimeSeries]]:
         """
-        Converte DataFrames para objetos TimeSeries do Darts.
+        Converte DataFrames para objetos TimeSeries do Darts com Reindexação Universal.
+        Garante que todas as séries comecem em DATA_START, evitando erros de drop_after.
         """
-        print("⚙️ Materializando dados do Spark para Pandas (Driver)...")
-        df_wide = df_spark_wide.toPandas()
-        
-        print(f"   DEBUG: Columns before dedupe: {list(df_wide.columns)}")
-        # Dedup columns strictly
-        df_wide = df_wide.loc[:, ~df_wide.columns.duplicated()]
-        print(f"   DEBUG: Columns after dedupe: {list(df_wide.columns)}")
-        
-        if "codigo_loja" in df_wide.columns:
-             col_obj = df_wide["codigo_loja"]
-             if isinstance(col_obj, pd.DataFrame):
-                  print("   ⚠️ CRITICAL: 'codigo_loja' is still a DataFrame (duplicate columns)!")
-                  # Force fix by keeping first
-                  df_wide = df_wide.loc[:, ~df_wide.columns.duplicated(keep='first')]
+        print(f"⚙️ Materializando dados e aplicando Reindexação Universal (Início: {self.config.DATA_START})...")
+        df_pd_raw = df_spark_wide.toPandas()
 
-        if df_wide.empty:
-            print("⚠️ AVISO: DataFrame df_wide está vazio! Verifique os filtros de data e dados.")
+        # --- Saneamento Atômico: Resolve erro de 1-dimensional ---
+        clean_dict = {}
+        for col in df_pd_raw.columns.unique():
+            col_name = str(col).strip()
+            series_data = df_pd_raw[col]
+            if isinstance(series_data, pd.DataFrame):
+                series_data = series_data.iloc[:, 0]
+            clean_dict[col_name] = series_data.values.flatten()
+        
+        df_pd = pd.DataFrame(clean_dict)
+        if df_pd.empty:
             return [], []
 
-        df_wide['data'] = pd.to_datetime(df_wide['data'])
+        # Formatação de tipos
+        df_pd['codigo_loja'] = df_pd['codigo_loja'].astype(str).str.replace(r'\.0$', '', regex=True)
+        df_pd['data'] = pd.to_datetime(df_pd['data'])
         
-        # Remove 'codigo_loja' from static_cols candidates since it is already the group_cols
-        possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
-        static_cols = [c for c in possible_static if c in df_wide.columns]
+        # Range total do projeto para uniformizar as séries
+        full_project_range = pd.date_range(
+            start=self.config.DATA_START, 
+            end=df_pd['data'].max(), 
+            freq='D'
+        )
 
-        print("   Build: Criando Target Series (Vetorizado)...")
-        try:
-            target_series_list = TimeSeries.from_group_dataframe(
-                df_wide,
-                group_cols="codigo_loja",
-                time_col="data",
-                value_cols="target_vendas",
-                static_cols=static_cols,
-                freq='D',
-                fill_missing_dates=True,
-                fillna_value=0.0
-            )
-        except Exception as e:
-            print(f"❌ Erro crítico no from_group_dataframe (Target): {e}")
-            raise e
+        static_features = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
+        available_features = [c for c in static_features if c in df_pd.columns]
 
-        # Mapa otimizado (Dictionary Comprehension)
-        # O Darts coloca a chave do grupo ('codigo_loja') no índice das covariáveis estáticas
-        # Vamos garantir que este índice tenha o nome correto
+        target_series_list = []
         target_dict = {}
-        for ts in target_series_list:
-            if ts.static_covariates is not None and not ts.static_covariates.empty:
-                # Renomeia o index para garantir que sabemos que é o codigo_loja
-                if ts.static_covariates.index.name == "target_vendas":
-                     ts.with_static_covariates(ts.static_covariates.rename_axis("codigo_loja"))
-                
-                key_val = str(ts.static_covariates.index[0]).replace(".0", "")
-                target_dict[key_val] = ts
-        
-        valid_stores = list(target_dict.keys())
-        print(f"   ℹ️ Lojas identificadas: {len(valid_stores)}")
+        feriado_dict = {}
 
-        print("   Build: Criando Covariáveis Locais...")
-        try:
-            feriado_series_list = TimeSeries.from_group_dataframe(
-                df_wide,
-                group_cols="codigo_loja",
-                time_col="data",
-                value_cols="is_feriado",
-                static_cols=static_cols,
-                freq='D',
-                fill_missing_dates=True,
-                fillna_value=0.0
+        print("   Build: Processando lojas com preenchimento de histórico faltante...")
+        for store_id, group_df in df_pd.groupby("codigo_loja"):
+            # 1. Uniformização Temporal (Reindex)
+            # Garante que lojas novas tenham histórico zerado desde o início do projeto
+            temp_df = (group_df.set_index('data')
+                       .reindex(full_project_range)
+                       .reset_index()
+                       .rename(columns={'index': 'data'}))
+            
+            # Preenche valores faltantes (0 para métricas, ffill/bfill para metadados da loja)
+            temp_df['target_vendas'] = temp_df['target_vendas'].fillna(0.0)
+            temp_df['is_feriado'] = temp_df['is_feriado'].fillna(0.0)
+            temp_df[available_features] = temp_df[available_features].ffill().bfill()
+            
+            # 2. Criar Target Series (Renomeando para ID da Loja)
+            ts_target = TimeSeries.from_dataframe(
+                temp_df.rename(columns={"target_vendas": store_id}), 
+                time_col="data", value_cols=[store_id], 
+                freq='D', fill_missing_dates=True, fillna_value=0.0
             )
-        except Exception as e:
-            print(f"❌ Erro crítico no from_group_dataframe (Feriado): {e}")
-            raise e
+            
+            # Metadados estáticos com nome do índice 'codigo_loja'
+            static_df = temp_df[available_features].iloc[0:1].copy()
+            static_df.index = pd.Index([store_id], name="codigo_loja")
+            ts_target = ts_target.with_static_covariates(static_df)
+            
+            target_dict[store_id] = ts_target
+            target_series_list.append(ts_target)
 
-        # Mapa otimizado (Dictionary Comprehension)
-        feriado_dict = {
-            str(ts.static_covariates.index[0]).replace(".0", ""): ts 
-            for ts in feriado_series_list
-            if ts.static_covariates is not None and not ts.static_covariates.empty
-        }
+            # 3. Criar Feriado Series
+            ts_f = TimeSeries.from_dataframe(
+                temp_df.rename(columns={"is_feriado": f"feriado_{store_id}"}), 
+                time_col="data", value_cols=[f"feriado_{store_id}"],
+                freq='D', fill_missing_dates=True, fillna_value=0.0
+            )
+            feriado_dict[store_id] = ts_f
 
-        # --- Stack Global ---
-        print("   Build: Preparando Covariáveis Globais...")
+        # --- Processamento de Covariáveis Globais ---
+        print("   Build: Preparando Covariáveis Globais e Calendário...")
         ts_support = TimeSeries.from_dataframe(df_global_support, fill_missing_dates=True, freq='D', fillna_value=0.0)
         
         if df_market_indicators is not None:
@@ -189,7 +191,7 @@ class DataIngestion:
         else:
              global_covariates = ts_support
 
-        # Features de Calendário
+        # Calendário baseado no range do suporte (já estendido para o futuro)
         ts_time = datetime_attribute_timeseries(df_global_support.index, attribute="dayofweek", cyclic=True)
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="quarter", one_hot=True))
         ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="week", cyclic=True))
@@ -198,32 +200,23 @@ class DataIngestion:
         final_target_list = []
         full_covariates_list = []
 
-        print("   Build: Stacking Final (Otimizado)...")
-        for loja in valid_stores:
+        print("   Build: Stacking Final com Alinhamento Temporal...")
+        for loja in target_dict.keys():
             ts_target = target_dict[loja]
             final_target_list.append(ts_target)
-            ts_local = feriado_dict.get(loja)
             
-            # Se não existir feriado específico, cria zerado
-            if ts_local is None:
-                ts_local = TimeSeries.from_times_and_values(
-                    ts_target.time_index, 
-                    np.zeros((len(ts_target), 1)), 
-                    freq='D',
-                    columns=["is_feriado"]
-                )
+            # Sincroniza suporte global (Início igual ao target, Fim estendido para o futuro)
+            ts_global_cut = global_covariates.drop_before(ts_target.start_time())
+            
+            # Sincroniza e estende Feriados para casar com o suporte global
+            ts_local = feriado_dict[loja]
+            if ts_local.end_time() < ts_global_cut.end_time():
+                df_feriado = ts_local.pd_dataframe().reindex(ts_global_cut.time_index).fillna(0.0)
+                ts_local = TimeSeries.from_dataframe(df_feriado, freq='D')
             else:
-                # Sincronia temporal
-                if ts_local.start_time() != ts_target.start_time() or ts_local.end_time() != ts_target.end_time():
-                    ts_local = ts_local.slice_intersect(ts_target)
-
-            # Sincronia global
-            if global_covariates.start_time() != ts_target.start_time() or global_covariates.end_time() != ts_target.end_time():
-                 ts_global_cut = global_covariates.slice_intersect(ts_target)
-            else:
-                 ts_global_cut = global_covariates
+                ts_local = ts_local.slice_intersect(ts_global_cut)
 
             full_covariates_list.append(ts_global_cut.stack(ts_local))
 
-        print(f"✅ Objetos Darts Prontos: {len(final_target_list)} lojas processadas.")
+        print(f"✅ Objetos Darts Prontos: {len(final_target_list)} lojas uniformizadas.")
         return final_target_list, full_covariates_list

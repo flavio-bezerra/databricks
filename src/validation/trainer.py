@@ -27,20 +27,13 @@ class ModelTrainer:
 
     def _extract_id_from_original(self, ts: TimeSeries) -> str:
         """
-        Extrai ID apenas de séries ORIGINAIS (Input), onde o índice é confiável.
+        Extrai o ID da loja do índice das covariáveis estáticas.
         """
         try:
-            if ts.static_covariates is not None:
-                # Como removemos codigo_loja das colunas estáticas (Data.py) para corrigir o erro de dimensão,
-                # a informação do ID agora reside exclusivamente no índice das covariáveis estáticas (comportamento padrão do Darts).
-                if not ts.static_covariates.empty:
-                    val = str(ts.static_covariates.index[0])
-                    # DEBUG: Print anomaly
-                    if "target_vendas" in val:
-                         print(f"⚠️ DEBUG ANOMALY: ID extracted is '{val}'. Static Covs:\n{ts.static_covariates.head()}")
-                    
-                    if val.endswith(".0"): val = val[:-2]
-                    return val
+            if ts.static_covariates is not None and not ts.static_covariates.empty:
+                # Com a correção no data.py, o ID está garantido no índice
+                val = str(ts.static_covariates.index[0])
+                return val.replace(".0", "")
         except:
             pass
         return "UNKNOWN"
