@@ -1,4 +1,4 @@
-# 🔮 Projeto CVC Lojas: Previsão Inteligente de Vendas
+**# 🔮 Projeto CVC Lojas: Previsão Inteligente de Vendas
 
 Bem-vindo ao **Cérebro Digital de Vendas** da CVC Lojas.
 
@@ -88,5 +88,3 @@ databricks/
 *   **Modelo Utilizado:** LightGBM (Gradient Boosting) com suporte a variáveis exógenas.
 *   **Biblioteca Principal:** Darts (Time Series).
 *   **Tracking:** MLflow (com registro no Unity Catalog).
-
-**Desenvolvido pela Equipe de Dados da CVC.**
