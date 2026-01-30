@@ -1,84 +1,92 @@
-# 📈 CVC Lojas - Forecasting MLOps Pipeline
+# 🔮 Projeto CVC Lojas: Previsão Inteligente de Vendas
 
-Este projeto implementa um pipeline de **MLOps ponta a ponta** para previsão de vendas das lojas físicas da CVC. A arquitetura utiliza **Databricks**, **Unity Catalog**, **Feature Store**, e modelos de Séries Temporais (**Darts**) orquestrados via **MLflow**.
+Bem-vindo ao **Cérebro Digital de Vendas** da CVC Lojas.
 
+Este documento foi escrito para explicar, de forma simples e didática, como utilizamos Inteligência Artificial para antecipar o futuro das vendas em nossas lojas físicas.
 
+---
 
-## 🏗️ Arquitetura e Estrutura
+## 🎯 O Que é Este Projeto?
 
-O projeto adota uma estrutura modular, separando a lógica de negócio (pacote `src`) da execução (Notebooks).
+Imagine se pudéssemos saber, com antecedência, quanto cada loja da CVC vai vender no próximo mês. Isso nos ajudaria a:
+1.  **Definir Metas Justas**: Baseadas no potencial real de cada loja.
+2.  **Planejar Campanhas**: Saber onde investir mais marketing.
+3.  **Antecipar Problemas**: Identificar lojas que precisão de ajuda antes mesmo do mês começar.
 
+Este projeto é exatamente isso: uma série de "robôs" (algoritmos) que analisam o passado para prever o futuro.
+
+---
+
+## 💡 Como Funciona a "Mágica"? (Sem "Technês")
+
+Para ensinar um computador a prever vendas, nós seguimos um processo que se parece muito com treinar um novo funcionário. Veja a analogia:
+
+### 1. O Estudante (Ingestão de Dados)
+Primeiro, o computador precisa estudar. Nós alimentamos ele com **anos de histórico de vendas**, mais informações extras como:
+*   Feriados (Carnaval vende menos? Natal vende mais?)
+*   Economia (O Dólar subiu? A inflação desceu?)
+*   Promoções antigas.
+
+### 2. A Prova (Validação de Modelos)
+Não confiamos no computador de olhos fechados. Nós aplicamos uma "prova" rigorosa chamada **Backtesting**.
+*   **Como funciona:** Nós escondemos os dados de 2024 do computador e pedimos para ele "adivinhar" o que aconteceu.
+*   Depois, comparamos o palpite dele com a realidade.
+*   Se ele errar pouco, ele passa de ano. Se errar muito, nós ajustamos a fórmula.
+
+### 3. A Formatura (Deploy)
+Quando encontramos o melhor "aluno" (o modelo que mais acertou), nós o "contratamos".
+Ele recebe um carimbo de **"Versão Oficial"** (Champion) e é colocado em um servidor seguro, pronto para trabalhar.
+
+### 4. O Oráculo (Inferência Recorrente)
+Toda segunda-feira (ou no início do mês), este modelo oficial acorda, olha para as vendas mais recentes, e gera uma **nova previsão para os próximos 35 dias**.
+
+---
+
+## 🤖 Conheça os Nossos "Robôs" (Arquivos do Projeto)
+
+Na pasta do projeto, você verá vários arquivos com nomes técnicos. Aqui está a tradução do que cada um faz:
+
+| Arquivo Técnico (`.ipynb`) | Apelido | O Que Ele Faz? |
+| :--- | :--- | :--- |
+| **`cvc_ingestao...`** | **O Entregador** | Busca os dados brutos no banco de dados e os organiza nas prateleiras digitais. |
+| **`cvc_consolidacao...`** | **O Bibliotecário** | Organiza as tabelas de apoio (Feriados, Calendário) para que o modelo entenda o contexto das datas. |
+| **`cvc_validacao...`** | **O Vestibular** | Testa VÁRIOS tipos de inteligência artificial diferentes e escolhe o venceador. |
+| **`cvc_treino_validacao...`** | **O Guardião** | Uma barreira de segurança. Antes de atualizar o sistema, ele verifica se a nova versão é realmente boa. Se não for, ele bloqueia. |
+| **`cvc_treino_final...`** | **A Formatura** | Treina o modelo definitivo com TODOS os dados disponíveis até hoje. |
+| **`cvc_inferencia...`** | **O Oráculo** | É quem realmente gera os números futuros. Ele consulta o modelo formado e escreve a previsão no banco de dados. |
+
+---
+
+## 📚 Glossário Rápido
+
+Termos que você pode ouvir a equipe de dados falando:
+
+*   **Feature Store:** É como um "supermercado de dados". Em vez de calcular tudo do zero toda vez, guardamos as informações prontas (limpas e organizadas) aqui.
+*   **Pipeline:** É a linha de montagem. O dado entra sujo de um lado e sai como uma previsão de venda do outro.
+*   **RMSE (Erro Quadrático Médio):** É a nota da prova. Quanto MENOR este número, mais o robô acertou a previsão.
+*   **Deploy:** O ato de colocar o sistema no ar para uso real.
+*   **Lag:** Olhar para trás. Um "Lag de 7 dias" significa que o modelo está olhando para as vendas de uma semana atrás para decidir a de hoje.
+
+---
+
+## ⚙️ Área Técnica (Para Desenvolvedores)
+
+Abaixo, detalhes técnicos da implementação para a equipe de Engenharia e Ciência de Dados manterem o projeto.
+
+### Estrutura de Pastas
 ```text
 databricks/
-├── src/                            # 📦 Core Package (Lógica Modularizada)
-│   ├── ingestion/                  # Conectores JDBC & Feature Store (Liquid Clustering)
-│   ├── validation/                 # Pipelines de Treino, Walk-Forward & Configs
-│   └── deploy/                     # Wrapper "All-in-One" para Inferência Produtiva
+├── src/                            # Lógica Python Pura (Modularizada)
+│   ├── ingestion/                  # Conectores e Feature Store
+│   ├── validation/                 # Configurações e Pipelines de Treino
+│   └── deploy/                     # Wrapper MLflow para Produção
 │
-├── 1_ingestao_features.ipynb       # ETL: SQL Server -> Databricks Feature Store
-├── 2_validacao_modelos.ipynb       # Experimentação: Backtesting (Walk-Forward)
-├── 3_treino_final_deploy.ipynb     # Deploy: Treino Final (2021-2025) -> Unity Catalog
-└── 4_inferencia_recorrente.ipynb   # Produção: Scoring Semanal/Mensal
+├── *.ipynb                         # Notebooks de Execução (Databricks Jobs)
 ```
 
----
+### Comandos Chave
+*   **Modelo Utilizado:** LightGBM (Gradient Boosting) com suporte a variáveis exógenas.
+*   **Biblioteca Principal:** Darts (Time Series).
+*   **Tracking:** MLflow (com registro no Unity Catalog).
 
-## 🚀 Fluxos de Trabalho (Workflows)
-
-### 1. Ingestão de Dados (`src.ingestion`)
-Responsável por trazer dados transacionais do Azure SQL para o **Feature Store** no Unity Catalog.
-* **Destaques:** Utiliza *Liquid Clustering* e remoção de duplicatas baseada em PKs para garantir qualidade na entrada.
-* **Artefato:** Tabelas Delta otimizadas em `ds_dev.cvc_val.*`.
-
-### 2. Validação de Modelos (`src.validation`)
-Executa uma validação rigorosa para escolher o melhor algoritmo.
-* **Metodologia:** *Strict Walk-Forward Validation*. O modelo é treinado e testado mês a mês no passado, sem vazamento de dados futuros.
-* **Modelos Avaliados:** LightGBM, XGBoost, TFT (Temporal Fusion Transformer), N-BEATS.
-* **Segurança:** Utiliza `OrdinalEncoder` com tratamento para categorias desconhecidas (novas lojas).
-
-### 3. Treino e Deploy (`src.deploy`)
-Treina a versão final do modelo com dados recentes (Pós-Pandemia: 2021-2025) para evitar *Concept Drift*.
-* **Wrapper "UnifiedForecaster":** O modelo é encapsulado em uma classe Python customizada que contém:
-    * O modelo treinado (ex: LightGBM).
-    * O pipeline de transformação (`Scalers`, `Encoders`).
-    * Lógica automática de geração de datas futuras e feriados.
-* **Registro:** O modelo é salvo no Unity Catalog e promovido via Alias (`@Champion`).
-
-### 4. Inferência Recorrente
-Pipeline agendado que consome o modelo `@Champion`.
-* **Resiliência:** O sistema detecta automaticamente se precisa gerar o esqueleto de datas futuras (Forecast Horizon) ou se ele já foi fornecido.
-* **Fallback:** Em caso de falha crítica, retorna um schema vazio válido para não quebrar jobs Spark dependentes.
-
----
-
-## 🛠️ Tecnologias e Bibliotecas
-
-* **Plataforma:** Databricks (Runtime ML)
-* **Governança:** Unity Catalog (Features & Models)
-* **Frameworks:**
-    * `Darts` (Time Series)
-    * `PySpark` & `Delta Lake`
-    * `MLflow` (Tracking & Registry)
-    * `Scikit-Learn` (Pipelines)
-
-## 📋 Como Executar
-
-### Pré-requisitos
-Certifique-se de que a pasta `src` esteja no diretório de trabalho ou instalada como biblioteca.
-
-### Passo a Passo
-1.  **Ingestão:** Execute `cvc_ingestao_features_validacao.ipynb` para atualizar as tabelas do Feature Store.
-2.  **Validação (Opcional):** Execute `cvc_validacao_modelos_lojas.ipynb` se desejar testar novas arquiteturas de modelo.
-3.  **Deploy:** Execute `cvc_treino_final_deploy.ipynb`. Este notebook irá:
-    * Treinar o modelo com dados até `2025-12-31`.
-    * Registrar o modelo no Unity Catalog.
-    * Atribuir a tag **@Champion** à nova versão.
-4.  **Inferência:** Execute `cvc_inferencia_recorrente.ipynb`. Ele carregará automaticamente a versão `@Champion` e salvará as previsões na tabela de resultados.
-
----
-
-## 🛡️ Robustez e Tratamento de Erros
-
-* **Safe ID Extraction:** O sistema blinda os IDs das lojas (`CODIGO_LOJA`) para evitar que transformações numéricas corrompam identificadores (ex: "Loja 001" virar "1.0").
-* **Future Skeleton:** O Wrapper é capaz de autocompletar datas futuras caso o input contenha apenas dados históricos.
-* **Schema Enforcement:** Retornos de erro padronizados garantem que o Spark não falhe por incompatibilidade de tipos.
+**Desenvolvido pela Equipe de Dados da CVC.**
