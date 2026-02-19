@@ -10,6 +10,7 @@ from darts.utils.timeseries_generation import datetime_attribute_timeseries
 class DataIngestion:
     """
     Responsável pela ingestão de dados, criação de Feature Sets e preparação para o Darts.
+    Ajustado para garantir cobertura de covariáveis (3 meses de margem).
     """
     def __init__(self, spark_session: SparkSession, config: Any):
         self.spark: SparkSession = spark_session
@@ -86,6 +87,7 @@ class DataIngestion:
         pdf['data'] = pd.to_datetime(pdf['data'])
         pdf = pdf.set_index('data').asfreq('D').fillna(0.0)
 
+        # Extensão base para garantir o horizonte de previsão
         full_range = pd.date_range(
             start=pdf.index.min(), 
             periods=len(pdf) + self.config.FORECAST_HORIZON, 
@@ -100,13 +102,13 @@ class DataIngestion:
         df_market_indicators: Optional[pd.DataFrame] = None
     ) -> Tuple[List[TimeSeries], List[TimeSeries]]:
         """
-        Converte DataFrames para objetos TimeSeries do Darts com Reindexação Universal.
-        Foca na Identidade por Componente para evitar o erro 'target_vendas'.
+        Converte DataFrames para objetos TimeSeries do Darts.
+        Aplica margem de 3 meses nas covariáveis para evitar erros de índice no fit/predict.
         """
-        print(f"⚙️ Materializando dados e aplicando Identidade por Loja (Início: {self.config.DATA_START})...")
+        print(f"⚙️ Materializando dados e aplicando margem de segurança temporal...")
         df_pd_raw = df_spark_wide.toPandas()
 
-        # Saneamento Atômico para garantir colunas 1D puras
+        # Saneamento de colunas
         clean_dict = {}
         for col in df_pd_raw.columns.unique():
             col_name = str(col).strip()
@@ -122,9 +124,17 @@ class DataIngestion:
         df_pd['codigo_loja'] = df_pd['codigo_loja'].astype(str).str.replace(r'\.0$', '', regex=True)
         df_pd['data'] = pd.to_datetime(df_pd['data'])
         
+        # Range original do projeto para as Targets
         full_project_range = pd.date_range(
             start=self.config.DATA_START, 
             end=df_pd['data'].max(), 
+            freq='D'
+        )
+
+        # --- DEFINIÇÃO DO RANGE EXPANDIDO PARA COVARIÁVEIS (±3 Meses) ---
+        covariates_range = pd.date_range(
+            start=pd.to_datetime(self.config.DATA_START) - pd.DateOffset(months=3),
+            end=df_global_support.index.max() + pd.DateOffset(months=3),
             freq='D'
         )
 
@@ -135,22 +145,18 @@ class DataIngestion:
         target_dict = {}
         feriado_dict = {}
 
-        print("   Build: Processando lojas com Identidade por Componente...")
+        print("   Build: Processando lojas e feriados locais...")
         for store_id, group_df in df_pd.groupby("codigo_loja"):
-            # Uniformização Temporal
-            temp_df = (group_df.set_index('data')
-                       .reindex(full_project_range)
-                       .reset_index()
-                       .rename(columns={'index': 'data'}))
+            # Target usa o range normal
+            temp_df_target = (group_df.set_index('data')
+                              .reindex(full_project_range)
+                              .reset_index()
+                              .rename(columns={'index': 'data'}))
             
-            temp_df['target_vendas'] = temp_df['target_vendas'].fillna(0.0)
-            temp_df['is_feriado'] = temp_df['is_feriado'].fillna(0.0)
-            temp_df[available_features] = temp_df[available_features].ffill().bfill()
+            temp_df_target['target_vendas'] = temp_df_target['target_vendas'].fillna(0.0)
             
-            # PASSO CRUCIAL: Renomear 'target_vendas' para o ID da loja
-            # Isso garante que o componente da série seja o ID real.
             ts_target = TimeSeries.from_dataframe(
-                temp_df.rename(columns={"target_vendas": str(store_id)}), 
+                temp_df_target.rename(columns={"target_vendas": str(store_id)}), 
                 time_col="data", 
                 value_cols=[str(store_id)], 
                 freq='D', 
@@ -158,56 +164,52 @@ class DataIngestion:
                 fillna_value=0.0
             )
             
-            # Metadados estáticos com nome do índice 'codigo_loja'
-            static_df = temp_df[available_features].iloc[0:1].copy()
+            static_df = group_df[available_features].iloc[0:1].copy()
             static_df.index = pd.Index([str(store_id)], name="codigo_loja")
             ts_target = ts_target.with_static_covariates(static_df)
             
             target_dict[store_id] = ts_target
             target_series_list.append(ts_target)
 
-            # Série de Feriados com nome único para stack seguro
+            # Feriado (Covariável Local) usa o range expandido
+            temp_df_cov = (group_df.set_index('data')
+                           .reindex(covariates_range)
+                           .fillna(0.0)
+                           .reset_index()
+                           .rename(columns={'index': 'data'}))
+
             ts_f = TimeSeries.from_dataframe(
-                temp_df.rename(columns={"is_feriado": f"feriado_{store_id}"}), 
+                temp_df_cov.rename(columns={"is_feriado": f"feriado_{store_id}"}), 
                 time_col="data", value_cols=[f"feriado_{store_id}"],
                 freq='D', fill_missing_dates=True, fillna_value=0.0
             )
             feriado_dict[store_id] = ts_f
 
-        print(f"   ℹ️ Lojas identificadas corretamente: {len(target_series_list)}")
-
-        # Preparação de Covariáveis Globais e Calendário
-        ts_support = TimeSeries.from_dataframe(df_global_support, fill_missing_dates=True, freq='D', fillna_value=0.0)
+        # --- PREPARAÇÃO DAS COVARIÁVEIS GLOBAIS (Expandidas) ---
+        df_global_ext = df_global_support.reindex(covariates_range).ffill().bfill().fillna(0.0)
+        ts_support = TimeSeries.from_dataframe(df_global_ext, fill_missing_dates=True, freq='D', fillna_value=0.0)
         
         if df_market_indicators is not None:
-             ts_market = TimeSeries.from_dataframe(df_market_indicators, fill_missing_dates=True, freq='D', fillna_value=0.0)
+             df_market_ext = df_market_indicators.reindex(covariates_range).ffill().bfill().fillna(0.0)
+             ts_market = TimeSeries.from_dataframe(df_market_ext, fill_missing_dates=True, freq='D', fillna_value=0.0)
              global_covariates = ts_support.stack(ts_market)
         else:
              global_covariates = ts_support
 
-        ts_time = datetime_attribute_timeseries(df_global_support.index, attribute="dayofweek", cyclic=True)
-        ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="quarter", one_hot=True))
-        ts_time = ts_time.stack(datetime_attribute_timeseries(df_global_support.index, attribute="week", cyclic=True))
+        # Features de tempo baseadas no range expandido
+        ts_time = datetime_attribute_timeseries(covariates_range, attribute="dayofweek", cyclic=True)
+        ts_time = ts_time.stack(datetime_attribute_timeseries(covariates_range, attribute="quarter", one_hot=True))
+        ts_time = ts_time.stack(datetime_attribute_timeseries(covariates_range, attribute="week", cyclic=True))
         global_covariates = global_covariates.stack(ts_time)
 
         final_target_list = []
         full_covariates_list = []
 
-        print("   Build: Stacking Final com Alinhamento Temporal...")
+        print("   Build: Stacking Final com Margem de Segurança...")
         for loja in target_dict.keys():
-            ts_target = target_dict[loja]
-            final_target_list.append(ts_target)
-            
-            ts_global_cut = global_covariates.drop_before(ts_target.start_time())
-            
-            ts_local = feriado_dict[loja]
-            if ts_local.end_time() < ts_global_cut.end_time():
-                df_feriado = ts_local.pd_dataframe().reindex(ts_global_cut.time_index).fillna(0.0)
-                ts_local = TimeSeries.from_dataframe(df_feriado, freq='D')
-            else:
-                ts_local = ts_local.slice_intersect(ts_global_cut)
+            final_target_list.append(target_dict[loja])
+            # Stack da global expandida com a local (feriados) expandida
+            full_covariates_list.append(global_covariates.stack(feriado_dict[loja]))
 
-            full_covariates_list.append(ts_global_cut.stack(ts_local))
-
-        print(f"✅ Objetos Darts Prontos: {len(final_target_list)} lojas processadas.")
+        print(f"✅ Objetos Darts Prontos com margem temporal: {len(final_target_list)} lojas.")
         return final_target_list, full_covariates_list
