@@ -11,6 +11,7 @@ Classes:
 - UnifiedForecaster: O modelo de produção All-in-One.
 """
 
+import re
 import mlflow
 import pickle
 import pandas as pd
@@ -18,6 +19,11 @@ import numpy as np
 from typing import Any, List, Optional, Dict
 from darts import TimeSeries
 from darts.utils.timeseries_generation import datetime_attribute_timeseries
+
+# Regex para identificar colunas de feriado POR LOJA (ex: 'feriado_1001').
+# Colunas globais como 'feriado_nacional' NÃO casam com este padrão e permanecem
+# nas covariáveis base, garantindo que o MinMaxScaler receba exatamente 62 features.
+_PER_STORE_FERIADO_RE = re.compile(r'^feriado_\d+$')
 
 class UnifiedForecaster(mlflow.pyfunc.PythonModel):
     """
@@ -151,12 +157,19 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         6. Chama model.predict() e inverte o scaling.
         """
         # Re-importação necessária pois o pickle do PythonModel pode perder referências globais
+        import re
         import pickle
         import pandas as pd
         import numpy as np
         import traceback
         from darts import TimeSeries
         from darts.utils.timeseries_generation import datetime_attribute_timeseries
+
+        # Helpers locais (garantem disponibilidade mesmo após deserialização do pickle)
+        def _is_per_store_feriado(col: str) -> bool:
+            """True apenas para colunas do tipo 'feriado_{ID_numérico}' (ex: 'feriado_1001').
+            Colunas globais como 'feriado_nacional' retornam False."""
+            return bool(re.match(r'^feriado_\d+$', col))
 
         # ── 1. HORIZONTE DE PREVISÃO ────────────────────────────────────────────
         n = 1
@@ -197,17 +210,20 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
                     if "codigo_loja" in ordered_static:
                         ordered_static.remove("codigo_loja")
 
-                    # Colunas de feriado no metadata são específicas por loja (ex: 'feriado_1001').
-                    # Separamos as colunas base (globais + calendário) das colunas de feriado.
-                    # Na etapa de construção por loja, renomeamos 'is_feriado' → 'feriado_{store_id}'.
-                    base_cov_cols = [c for c in covariate_cols_meta if not c.startswith('feriado_')]
-                    has_feriado_in_meta = any(c.startswith('feriado_') for c in covariate_cols_meta)
+                    # Separação entre colunas de feriado GLOBAIS e POR LOJA:
+                    #   - 'feriado_nacional' → global → fica em base_cov_cols → vai para o scaler
+                    #   - 'feriado_1001'     → por loja → tratada separadamente por loja
+                    # IMPORTANTE: usar startswith('feriado_') seria errado pois excluiria
+                    # 'feriado_nacional', causando MinMaxScaler com 61 features vs 62 esperadas.
+                    base_cov_cols = [c for c in covariate_cols_meta if not _is_per_store_feriado(c)]
+                    has_feriado_in_meta = any(_is_per_store_feriado(c) for c in covariate_cols_meta)
                 else:
                     # Fallback heurístico se não houver metadata
                     possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
                     ordered_static = [c for c in possible_static if c in model_input.columns]
                     reserved = set(['data', 'codigo_loja', 'target_vendas', 'n', 'is_feriado'] + ordered_static)
-                    base_cov_cols = [c for c in model_input.columns if c not in reserved]
+                    # Exclui apenas colunas de feriado por loja (ex: feriado_1001), mantendo feriado_nacional
+                    base_cov_cols = [c for c in model_input.columns if c not in reserved and not _is_per_store_feriado(c)]
                     has_feriado_in_meta = 'is_feriado' in model_input.columns
 
                 # ── 4. CONSTRUÇÃO DE SÉRIES DARTS POR LOJA ───────────────────────
