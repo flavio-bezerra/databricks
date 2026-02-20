@@ -102,8 +102,9 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
 
     def _add_calendar_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Gera features de calendário (dia da semana, dia do ano) on-the-fly.
+        Gera features de calendário (dia da semana, trimestre, semana) on-the-fly.
         Isso evita que o usuário precise mandar colunas como 'dayofweek' manualmente.
+        Segue exatamente o mesmo padrão do data.py (build_darts_objects).
         """
         if 'data' not in df.columns:
             return df
@@ -114,12 +115,11 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
             ts_idx = pd.to_datetime(ts_idx)
         ts_idx = ts_idx.sort_values()
         
-        # Cria as features usando utilitários do Darts
-        ts_day = datetime_attribute_timeseries(ts_idx, attribute="dayofweek", cyclic=True)
+        # Cria as features usando utilitários do Darts (idêntico ao data.py)
+        ts_day     = datetime_attribute_timeseries(ts_idx, attribute="dayofweek", cyclic=True)
         ts_quarter = datetime_attribute_timeseries(ts_idx, attribute="quarter", one_hot=True)
-        ts_week = datetime_attribute_timeseries(ts_idx, attribute="week", cyclic=True)
+        ts_week    = datetime_attribute_timeseries(ts_idx, attribute="week", cyclic=True)
         
-        # Junta tudo
         ts_full = ts_day.stack(ts_quarter).stack(ts_week)
         df_cal = ts_full.pd_dataframe().reset_index().rename(columns={'time': 'data'})
         
@@ -137,151 +137,206 @@ class UnifiedForecaster(mlflow.pyfunc.PythonModel):
         """
         Método mestre de inferência.
         Aceita um DataFrame Pandas com histórico de vendas e retorna DataFrame com previsões.
+
+        Fluxo interno:
+        1. Extrai horizonte 'n' da coluna do input.
+        2. Expande o DataFrame para cobrir datas futuras (_ensure_future_horizon).
+        3. Gera features de calendário (_add_calendar_features).
+        4. Constrói TimeSeries Darts POR LOJA em loop — mesmo padrão do data.py no treino:
+           - Target: TimeSeries com .with_static_covariates() → exatamente 4 colunas estáticas
+             (evita o bug do from_group_dataframe que adiciona 'codigo_loja' como 5ª coluna)
+           - Covariáveis: colunas base (globais + calendário) + is_feriado renomeado
+             para feriado_{store_id} (resolve o bug do metadata hardcodar feriado_1001)
+        5. Aplica pipeline de scaling (target, static, covariate).
+        6. Chama model.predict() e inverte o scaling.
         """
         # Re-importação necessária pois o pickle do PythonModel pode perder referências globais
-        import mlflow
         import pickle
         import pandas as pd
         import numpy as np
+        import traceback
         from darts import TimeSeries
         from darts.utils.timeseries_generation import datetime_attribute_timeseries
-        
-        # 1. Definição do Horizonte (n)
-        # Tenta ler a coluna 'n' do input (passada pelo usuário), senão default=1
+
+        # ── 1. HORIZONTE DE PREVISÃO ────────────────────────────────────────────
         n = 1
         if isinstance(model_input, pd.DataFrame) and 'n' in model_input.columns:
             try:
                 n = int(model_input.iloc[0]['n'])
             except Exception:
                 pass
-        
+
         predict_kwargs = {"n": n}
 
         try:
             if isinstance(model_input, pd.DataFrame) and len(model_input) > 1:
-                
-                # --- PRÉ-PROCESSAMENTO (Feature Engineering) ---
+
+                # ── 2. PRÉ-PROCESSAMENTO ────────────────────────────────────────
+                # Remove colunas duplicadas resultantes de merges anteriores
                 model_input = model_input.loc[:, ~model_input.columns.duplicated()]
-                # Expande linhas para cobrir o futuro
+                # Expande o DataFrame para cobrir o futuro (criar "slots" para o Darts)
                 model_input = self._ensure_future_horizon(model_input, n)
-                # Adiciona features de data
+                # Gera features de calendário idênticas ao treino (dayofweek, quarter, week)
+                # NUNCA vêm pré-calculadas do notebook — geradas aqui para garantir consistência
                 model_input = self._add_calendar_features(model_input)
+                model_input['data'] = pd.to_datetime(model_input['data'])
 
-                # --- ORDENAÇÃO DE COLUNAS ---
-                # Garante que as colunas estejam na mesma ordem que o modelo viu no treino.
-                if hasattr(self, 'metadata') and self.metadata:
-                    ordered_static = self.metadata.get("static_cols_order", [])
-                    ordered_covariates = self.metadata.get("covariate_cols_order", [])
-                    if "codigo_loja" in ordered_static:
-                        ordered_static.remove("codigo_loja")
-                else:
-                    # Fallback heuristic se não tiver metadata
-                    possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
-                    ordered_static = [c for c in possible_static if c in model_input.columns]
-                    ordered_static = [c for c in ordered_static if c in model_input.columns]
-                    reserved = set(['data', 'codigo_loja', 'target_vendas', 'n'] + ordered_static)
-                    ordered_covariates = [c for c in model_input.columns if c not in reserved]
-
-                # Preenche covariáveis faltantes com 0.0 (segurança)
-                for col in ordered_covariates:
-                    if col not in model_input.columns:
-                        model_input[col] = 0.0
-
-                # --- CONSTRUÇÃO DE SÉRIES DARTS ---
-                df_history = model_input.dropna(subset=['target_vendas'])
-                
-                # Série Alvo (Target)
-                target_series_list = TimeSeries.from_group_dataframe(
-                    df_history,
-                    group_cols="codigo_loja",
-                    time_col="data",
-                    value_cols="target_vendas",
-                    static_cols=ordered_static,
-                    freq='D',
-                    fill_missing_dates=True,
-                    fillna_value=0.0
+                # Limpa código de loja (remove ".0" de floats convertidos para string)
+                model_input['codigo_loja'] = (
+                    model_input['codigo_loja']
+                    .astype(str)
+                    .str.replace(r'\.0$', '', regex=True)
                 )
 
-                # Mapeamento ID -> Objeto (para rastreabilidade)
-                store_ids_map = []
-                for ts in target_series_list:
-                    if "codigo_loja" in ts.static_covariates.columns:
-                        raw_id = str(ts.static_covariates["codigo_loja"].iloc[0])
-                    else:
-                        raw_id = str(ts.static_covariates.index[0])
-                    store_ids_map.append(raw_id)
+                # ── 3. RESOLUÇÃO DE COLUNAS (metadata do treino) ─────────────────
+                if hasattr(self, 'metadata') and self.metadata:
+                    ordered_static = list(self.metadata.get("static_cols_order", []))
+                    covariate_cols_meta = list(self.metadata.get("covariate_cols_order", []))
 
-                # Séries Covariáveis (Features dinâmicas)
-                cov_dict = {}
-                if ordered_covariates:
-                    covariate_series_list = TimeSeries.from_group_dataframe(
-                        model_input,
-                        group_cols="codigo_loja",
-                        time_col="data",
-                        value_cols=ordered_covariates, 
+                    # codigo_loja não é covariável estática — é o índice/grupo
+                    if "codigo_loja" in ordered_static:
+                        ordered_static.remove("codigo_loja")
+
+                    # Colunas de feriado no metadata são específicas por loja (ex: 'feriado_1001').
+                    # Separamos as colunas base (globais + calendário) das colunas de feriado.
+                    # Na etapa de construção por loja, renomeamos 'is_feriado' → 'feriado_{store_id}'.
+                    base_cov_cols = [c for c in covariate_cols_meta if not c.startswith('feriado_')]
+                    has_feriado_in_meta = any(c.startswith('feriado_') for c in covariate_cols_meta)
+                else:
+                    # Fallback heurístico se não houver metadata
+                    possible_static = ["cluster_loja", "sigla_uf", "tipo_loja", "modelo_loja"]
+                    ordered_static = [c for c in possible_static if c in model_input.columns]
+                    reserved = set(['data', 'codigo_loja', 'target_vendas', 'n', 'is_feriado'] + ordered_static)
+                    base_cov_cols = [c for c in model_input.columns if c not in reserved]
+                    has_feriado_in_meta = 'is_feriado' in model_input.columns
+
+                # ── 4. CONSTRUÇÃO DE SÉRIES DARTS POR LOJA ───────────────────────
+                #
+                # PORQUÊ loop e não from_group_dataframe:
+                #   - from_group_dataframe(group_cols="codigo_loja") adiciona automaticamente
+                #     'codigo_loja' como COLUNA das static_covariates, gerando 5 dimensões
+                #     enquanto o modelo foi treinado com 4 (via .with_static_covariates()).
+                #   - Isso causa: "boolean index did not match... dimension is 5 but is 4"
+                #
+                # PORQUÊ renomear is_feriado → feriado_{store_id}:
+                #   - O treino (data.py) cria 'feriado_{store_id}' por loja.
+                #   - O metadata.covariate_cols_order guarda o nome da PRIMEIRA loja do treino.
+                #   - Para qualquer outra loja, a coluna 'feriado_XXXX' não existe no input.
+                #   - Solução: renomear 'is_feriado' para o nome correto por loja.
+
+                target_series_list = []
+                covariate_series_list = []
+                store_ids_map = []
+
+                for store_id_raw, store_df in model_input.groupby('codigo_loja'):
+                    store_id = str(store_id_raw)
+                    store_df = store_df.copy().sort_values('data').reset_index(drop=True)
+
+                    # ── 4a. TARGET ──────────────────────────────────────────────
+                    history_df = store_df.dropna(subset=['target_vendas'])
+                    if history_df.empty:
+                        print(f"⚠️  Loja {store_id}: sem histórico de target. Pulando.")
+                        continue
+
+                    # Constrói TimeSeries do target com nome da coluna = store_id
+                    ts_target = TimeSeries.from_dataframe(
+                        history_df.rename(columns={'target_vendas': store_id}),
+                        time_col='data',
+                        value_cols=[store_id],
                         freq='D',
                         fill_missing_dates=True,
                         fillna_value=0.0
                     )
-                    for ts in covariate_series_list:
-                        if "codigo_loja" in ts.static_covariates.columns:
-                            c_id = str(ts.static_covariates["codigo_loja"].iloc[0])
-                        else:
-                            c_id = str(ts.static_covariates.index[0])
-                        cov_dict[c_id] = ts
 
-                # --- TRANSFORM (SCALING) ---
-                # Aplica o pipeline carregado do pickle (mesma média/desvio do treino)
-                final_series_input = []
-                final_covariates_input = []
-                
-                has_target_scaler = hasattr(self.pipeline, 'target_pipeline')
+                    # Adiciona static_covariates via .with_static_covariates()
+                    # → garante EXATAMENTE as mesmas 4 colunas do treino, sem codigo_loja
+                    avail_static = [c for c in ordered_static if c in history_df.columns]
+                    if avail_static:
+                        static_df = history_df[avail_static].iloc[0:1].copy()
+                        static_df.index = pd.Index([store_id], name='codigo_loja')
+                        ts_target = ts_target.with_static_covariates(static_df)
+
+                    target_series_list.append(ts_target)
+                    store_ids_map.append(store_id)
+
+                    # ── 4b. COVARIÁVEIS ─────────────────────────────────────────
+                    # Colunas base (globais + calendário) disponíveis no input desta loja
+                    avail_cov = [c for c in base_cov_cols if c in store_df.columns]
+
+                    # Renomeia is_feriado → feriado_{store_id} (padrão do treino)
+                    feriado_col = f'feriado_{store_id}'
+                    if 'is_feriado' in store_df.columns:
+                        store_df[feriado_col] = store_df['is_feriado'].fillna(0.0)
+                        avail_cov.append(feriado_col)
+                    elif has_feriado_in_meta:
+                        # Feriado esperado mas ausente → preenche com zeros
+                        store_df[feriado_col] = 0.0
+                        avail_cov.append(feriado_col)
+
+                    if avail_cov:
+                        ts_cov = TimeSeries.from_dataframe(
+                            store_df,
+                            time_col='data',
+                            value_cols=avail_cov,
+                            freq='D',
+                            fill_missing_dates=True,
+                            fillna_value=0.0
+                        )
+                        covariate_series_list.append(ts_cov)
+                    else:
+                        covariate_series_list.append(None)
+
+                if not target_series_list:
+                    raise ValueError("Nenhuma série de target válida encontrada no input.")
+
+                # ── 5. TRANSFORM (SCALING) ────────────────────────────────────────
+                has_target_scaler  = hasattr(self.pipeline, 'target_pipeline')
                 has_static_encoder = hasattr(self.pipeline, 'static_pipeline')
-                has_cov_scaler = hasattr(self.pipeline, 'covariate_pipeline')
+                has_cov_scaler     = hasattr(self.pipeline, 'covariate_pipeline')
+
+                final_series_input     = []
+                final_covariates_input = []
 
                 for i, ts_target in enumerate(target_series_list):
-                    store_id = store_ids_map[i]
-                    
                     ts_proc = ts_target
-                    if has_target_scaler: ts_proc = self.pipeline.target_pipeline.transform(ts_proc)
+                    if has_target_scaler:  ts_proc = self.pipeline.target_pipeline.transform(ts_proc)
                     if has_static_encoder: ts_proc = self.pipeline.static_pipeline.transform(ts_proc)
                     final_series_input.append(ts_proc)
 
-                    if store_id in cov_dict:
-                        ts_cov = cov_dict[store_id]
+                    ts_cov = covariate_series_list[i] if i < len(covariate_series_list) else None
+                    if ts_cov is not None:
                         if has_cov_scaler: ts_cov = self.pipeline.covariate_pipeline.transform(ts_cov)
                         final_covariates_input.append(ts_cov)
-                
+
                 predict_kwargs['series'] = final_series_input
-                if final_covariates_input:
+                if final_covariates_input and len(final_covariates_input) == len(final_series_input):
                     predict_kwargs['future_covariates'] = final_covariates_input
 
-            # --- PREDIÇÃO REAL ---
+            # ── 6. PREDIÇÃO ───────────────────────────────────────────────────────
             pred_series_list = self.model.predict(**predict_kwargs)
-            if not isinstance(pred_series_list, list): pred_series_list = [pred_series_list]
-            
-            # --- PÓS-PROCESSAMENTO ---
+            if not isinstance(pred_series_list, list):
+                pred_series_list = [pred_series_list]
+
+            # ── 7. PÓS-PROCESSAMENTO (Inverse Transform + Montagem do DF) ────────
             final_df_list = []
-            
             for pred_series, original_store_id in zip(pred_series_list, store_ids_map):
-                # Desfaz o scaling (Inverte transformação)
                 pred_inverse = self.pipeline.inverse_transform(pred_series, partial=True)
-                df = pred_inverse.pd_dataframe()
-                
-                # Reconstrói dataframe de resposta
-                df['codigo_loja'] = original_store_id
-                col_val = [c for c in df.columns if c not in ['codigo_loja', 'data']][0]
-                df.rename(columns={col_val: 'previsao_venda'}, inplace=True)
-                final_df_list.append(df)
-                
+                df_pred = pred_inverse.pd_dataframe()
+
+                df_pred['codigo_loja'] = original_store_id
+                col_val = [c for c in df_pred.columns if c not in ['codigo_loja', 'data']][0]
+                df_pred.rename(columns={col_val: 'previsao_venda'}, inplace=True)
+                final_df_list.append(df_pred)
+
             return pd.concat(final_df_list).reset_index().rename(columns={'data': 'data_previsao'})
 
         except Exception as e:
-            # --- TRATAMENTO DE ERRO / FALHA PARCIAL ---
+            # ── FALLBACK DE SEGURANÇA ─────────────────────────────────────────────
+            # Retorna DataFrame com zeros em vez de propagar a exceção.
+            # Isso impede que o Spark aborte o job inteiro por causa de 1 loja com problema.
             print(f"⚠️ [UnifiedForecaster] Erro Crítico: {str(e)}")
-            
-            # Retorno de segurança: DataFrame vazio ou com zeros, mas com Schema correto.
-            # Isso impede que o Spark aborte o job inteiro pq 1 batch falhou.
+            traceback.print_exc()
+
             fallback_dates = pd.date_range(start="2025-01-01", periods=n, freq="D")
             df_error = pd.DataFrame({
                 'data_previsao': fallback_dates,
